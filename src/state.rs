@@ -22,7 +22,9 @@ pub struct Snapshot {
     pub quota: Option<Quota>,
     pub session: Option<SessionInfo>,
     pub health: Health,
-    pub cost_usd: f64,
+    /// `None` when the session used a model with no entry in the price table,
+    /// which is not the same thing as a session that cost nothing.
+    pub cost_usd: Option<f64>,
 }
 
 impl Snapshot {

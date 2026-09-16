@@ -146,10 +146,12 @@ impl Tray for Indicator {
                 "Tokens         {} in · {} out · {} cache",
                 s.tokens.input, s.tokens.output, s.tokens.cache_read
             )));
-            items.push(info(format!(
-                "Custo est.     US$ {:.2}  (teórico)",
-                self.snap.cost_usd
-            )));
+            items.push(info(match self.snap.cost_usd {
+                Some(c) => format!("Custo est.     US$ {c:.2}  (teórico)"),
+                // A model with no price beats printing US$ 0,00 beside
+                // millions of tokens and calling it an estimate.
+                None => "Custo est.     —  (modelo sem preço conhecido)".into(),
+            }));
         }
 
         items.push(MenuItem::Separator);

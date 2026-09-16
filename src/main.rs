@@ -152,7 +152,7 @@ impl Daemon {
             // A finished one leaves the snapshot empty, and the menu's whole
             // session section disappears with it.
             if info.is_active(now) {
-                snap.cost_usd = pricing::cost_usd(&info.model, &info.tokens);
+                snap.cost_usd = pricing::cost_usd(&info.by_model);
                 snap.session = Some(info);
             }
         }

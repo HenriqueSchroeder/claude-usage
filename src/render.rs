@@ -7,6 +7,10 @@ pub struct Rgb(pub u8, pub u8, pub u8);
 
 pub const DEFAULT_COLOR: Rgb = Rgb(0x87, 0xb1, 0x5b);
 
+/// What a placeholder renders as when the value behind it is not known. A
+/// dash is read as "no answer"; a zero is read as an answer.
+pub const NO_VALUE: &str = "—";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Effect {
     None,
@@ -39,7 +43,9 @@ fn metric_value(snap: &Snapshot, metric: &str) -> Option<f32> {
     match metric {
         "session" => Some(snap.session_pct()),
         "weekly" => Some(snap.weekly_pct()),
-        "cost" => Some(snap.cost_usd as f32),
+        // An unknown cost matches no rule: a threshold on a number we do not
+        // have is not crossed, it is unanswerable.
+        "cost" => snap.cost_usd.map(|c| c as f32),
         _ => None,
     }
 }
@@ -57,7 +63,7 @@ fn expand(template: &str, snap: &Snapshot, now: OffsetDateTime) -> String {
     let reset = snap
         .reset_in(now)
         .map(human_duration)
-        .unwrap_or_else(|| "—".into());
+        .unwrap_or_else(|| NO_VALUE.into());
     let session = snap.session.as_ref();
 
     let mut out = String::with_capacity(template.len());
@@ -77,7 +83,10 @@ fn expand(template: &str, snap: &Snapshot, now: OffsetDateTime) -> String {
             "session" => Some(format!("{:.0}", snap.session_pct())),
             "weekly" => Some(format!("{:.0}", snap.weekly_pct())),
             "reset" => Some(reset.clone()),
-            "cost" => Some(format!("{:.2}", snap.cost_usd)),
+            "cost" => Some(match snap.cost_usd {
+                Some(c) => format!("{c:.2}"),
+                None => NO_VALUE.into(),
+            }),
             "project" => session.map(|s| s.project.clone()),
             "model" => session.map(|s| s.model.clone()),
             "tokens" => session.map(|s| format!("{}", s.tokens.output)),

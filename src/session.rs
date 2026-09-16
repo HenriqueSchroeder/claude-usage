@@ -1,5 +1,6 @@
 use crate::pricing::Tokens;
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use time::{Duration, OffsetDateTime};
@@ -20,6 +21,11 @@ pub struct SessionInfo {
     pub session_id: String,
     pub started_at: Option<OffsetDateTime>,
     pub last_at: Option<OffsetDateTime>,
+    /// Every model's tokens, summed separately, because one session can mix
+    /// them and they are not priced alike.
+    pub by_model: HashMap<String, Tokens>,
+    /// The same tokens again, summed across models. The menu's token line is
+    /// model-agnostic; only the cost needs the split.
     pub tokens: Tokens,
     pub model: String,
 }
@@ -198,12 +204,15 @@ impl Tailer {
             self.info.model = m;
         }
         if let Some(u) = msg.usage {
-            self.info.tokens.add(&Tokens {
+            let t = Tokens {
                 input: u.input_tokens,
                 output: u.output_tokens,
                 cache_read: u.cache_read_input_tokens,
                 cache_creation: u.cache_creation_input_tokens,
-            });
+            };
+            self.info.tokens.add(&t);
+            let model = self.info.model.clone();
+            self.info.by_model.entry(model).or_default().add(&t);
         }
     }
 }
@@ -399,6 +408,30 @@ mod tests {
 
         assert!(info.last_at.is_none());
         assert!(!info.is_active(datetime!(2026-09-15 14:43:12 UTC)));
+        std::fs::remove_file(p).ok();
+    }
+
+    #[test]
+    fn tokens_are_split_per_model_as_well_as_totalled() {
+        let p = scratch("bymodel");
+        std::fs::write(
+            &p,
+            format!(
+                "{}\n{}\n{}\n",
+                line("claude-opus-5", 10),
+                line("claude-opus-5", 5),
+                line("claude-haiku-4-5", 3)
+            ),
+        )
+        .unwrap();
+        let mut t = Tailer::new(p.clone());
+        let info = t.poll();
+
+        // The menu's token line stays a plain total...
+        assert_eq!(info.tokens.output, 18);
+        // ...while the cost has the split it needs to price each model right.
+        assert_eq!(info.by_model["claude-opus-5"].output, 15);
+        assert_eq!(info.by_model["claude-haiku-4-5"].output, 3);
         std::fs::remove_file(p).ok();
     }
 
