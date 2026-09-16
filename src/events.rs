@@ -32,6 +32,8 @@ struct Persisted {
     last_weekly_reset: Option<i64>,
     #[serde(default)]
     seen: bool,
+    #[serde(default)]
+    notified_unauthorized: bool,
 }
 
 pub struct Detector {
@@ -66,14 +68,23 @@ impl Detector {
 
     /// Compares this snapshot against the previous one and reports events.
     ///
-    /// The first call after start reports nothing: without a previous state
-    /// every threshold already crossed would fire at once, and the daemon
-    /// would notify everything on every boot.
+    /// The first call after start reports no threshold crossings and no
+    /// window resets: without a previous state, every threshold already
+    /// crossed would fire at once and every resets_at would look like a
+    /// rollover, so the daemon would notify everything on every boot.
+    /// Unauthorized is the one exception: it is deduped across polls like
+    /// the rest, but still reported the moment it is seen, first cycle
+    /// included, since a user cannot fix an expired token nobody mentioned.
     pub fn diff(&mut self, snap: &Snapshot) -> Vec<Event> {
         let mut events = Vec::new();
 
         if snap.health == Health::Unauthorized {
-            events.push(Event::Unauthorized);
+            if !self.state.notified_unauthorized {
+                events.push(Event::Unauthorized);
+                self.state.notified_unauthorized = true;
+            }
+        } else {
+            self.state.notified_unauthorized = false;
         }
 
         let first_run = !self.state.seen;
@@ -140,7 +151,7 @@ mod tests {
     use super::*;
     use crate::config::ThresholdConfig;
     use crate::quota::Quota;
-    use crate::state::Snapshot;
+    use crate::state::{Health, Snapshot};
     use time::macros::datetime;
 
     fn cfg() -> ThresholdConfig {
@@ -158,6 +169,23 @@ mod tests {
         Snapshot {
             quota: Some(q),
             ..Default::default()
+        }
+    }
+
+    fn snap_session(session: f32) -> Snapshot {
+        let mut q = Quota::default();
+        q.session.percent = session;
+        q.session.resets_at = Some(datetime!(2026-09-16 07:00 UTC));
+        Snapshot {
+            quota: Some(q),
+            ..Default::default()
+        }
+    }
+
+    fn snap_with_health(health: Health) -> Snapshot {
+        Snapshot {
+            health,
+            ..snap(50.0)
         }
     }
 
@@ -238,5 +266,62 @@ mod tests {
         let mut reloaded = Detector::load(&p, cfg());
         assert!(reloaded.diff(&snap(81.0)).is_empty());
         std::fs::remove_file(p).ok();
+    }
+
+    #[test]
+    fn unauthorized_fires_once_then_rearms_after_recovery() {
+        let mut d = Detector::new(cfg());
+        let bad = snap_with_health(Health::Unauthorized);
+        let ok = snap_with_health(Health::Ok);
+
+        // Fires on the very first poll: unlike thresholds, a startup with an
+        // already-expired token must say so immediately.
+        assert!(d
+            .diff(&bad)
+            .iter()
+            .any(|e| matches!(e, Event::Unauthorized)));
+        // Still unauthorized on the next two polls: must not refire.
+        assert!(!d
+            .diff(&bad)
+            .iter()
+            .any(|e| matches!(e, Event::Unauthorized)));
+        assert!(!d
+            .diff(&bad)
+            .iter()
+            .any(|e| matches!(e, Event::Unauthorized)));
+
+        // Recovers, then expires again: must notify the new episode.
+        d.diff(&ok);
+        assert!(d
+            .diff(&bad)
+            .iter()
+            .any(|e| matches!(e, Event::Unauthorized)));
+    }
+
+    #[test]
+    fn crossing_a_level_on_session_leaves_weekly_armed_set_untouched() {
+        let mut d = Detector::new(cfg());
+        d.diff(&snap_session(70.0));
+        let evs = d.diff(&snap_session(80.0));
+        assert_eq!(evs.len(), 1);
+        assert!(matches!(
+            evs[0],
+            Event::ThresholdCrossed {
+                metric: Metric::Session,
+                level: 75
+            }
+        ));
+
+        // Weekly's armed set is a separate field: an unrelated fresh weekly
+        // reading still fires its own crossing instead of coming back armed.
+        let weekly_evs = d.diff(&snap(80.0));
+        assert_eq!(weekly_evs.len(), 1);
+        assert!(matches!(
+            weekly_evs[0],
+            Event::ThresholdCrossed {
+                metric: Metric::Weekly,
+                level: 75
+            }
+        ));
     }
 }
