@@ -15,6 +15,10 @@ impl Tray for Probe {
     fn icon_name(&self) -> String {
         "utilities-system-monitor-symbolic".into()
     }
+
+    fn label(&self) -> String {
+        "98%".into()
+    }
 }
 
 fn main() {
