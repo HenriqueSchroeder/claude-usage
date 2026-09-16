@@ -3,6 +3,7 @@ use ksni::Tray;
 
 mod config;
 mod creds;
+mod events;
 mod pricing;
 mod quota;
 mod session;
