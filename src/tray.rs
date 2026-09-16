@@ -2,7 +2,8 @@ use crate::icon::ring;
 use crate::quota::Severity;
 use crate::render::{human_duration, BarOutput, Effect};
 use crate::state::{Health, Snapshot};
-use ksni::{menu::StandardItem, Icon, MenuItem, Status, Tray};
+use ksni::{menu::StandardItem, Icon, MenuItem, OfflineReason, Status, Tray};
+use std::sync::atomic::{AtomicBool, Ordering};
 use time::OffsetDateTime;
 
 /// The panel item.
@@ -13,6 +14,20 @@ use time::OffsetDateTime;
 pub struct Indicator {
     pub bar: BarOutput,
     pub snap: Snapshot,
+    /// Whether the missing-host diagnostic has already been printed. `ksni`
+    /// hands `watcher_offline` a `&self`, and the alternative to an atomic
+    /// here is one identical line in the journal per reconnection attempt.
+    offline_reported: AtomicBool,
+}
+
+impl Indicator {
+    pub fn new(bar: BarOutput, snap: Snapshot) -> Self {
+        Indicator {
+            bar,
+            snap,
+            offline_reported: AtomicBool::new(false),
+        }
+    }
 }
 
 /// Normal and HiDPI. Hosts pick whichever matches the panel scale.
@@ -118,6 +133,30 @@ impl Tray for Indicator {
         }
     }
 
+    /// No `org.kde.StatusNotifierWatcher` on the bus.
+    ///
+    /// `assume_sni_available(true)` turns this from a spawn error into a
+    /// silent wait, which is right — the host may well show up later — but
+    /// left someone on stock GNOME with `active (running)`, an empty panel
+    /// and an empty journal, and no way to find out why. Returning `true`
+    /// keeps waiting; the line says what to look at meanwhile.
+    fn watcher_offline(&self, reason: OfflineReason) -> bool {
+        if !self.offline_reported.swap(true, Ordering::Relaxed) {
+            eprintln!(
+                "claude-usage: no StatusNotifier host on the session bus ({reason:?}). \
+                 On GNOME this usually means the AppIndicator extension is not enabled. \
+                 The daemon keeps running and the icon will appear when a host does."
+            );
+        }
+        true
+    }
+
+    fn watcher_online(&self) {
+        if self.offline_reported.swap(false, Ordering::Relaxed) {
+            eprintln!("claude-usage: StatusNotifier host is back, registering the icon");
+        }
+    }
+
     fn menu(&self) -> Vec<MenuItem<Self>> {
         let mut items = Vec::new();
 
@@ -181,5 +220,72 @@ impl Tray for Indicator {
             .into(),
         );
         items
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::render::DEFAULT_COLOR;
+
+    fn indicator() -> Indicator {
+        Indicator::new(
+            BarOutput {
+                text: String::new(),
+                color: DEFAULT_COLOR,
+                effect: Effect::None,
+            },
+            Snapshot::default(),
+        )
+    }
+
+    #[test]
+    fn the_missing_host_warning_is_printed_once_per_outage() {
+        let t = indicator();
+        assert!(t.watcher_offline(OfflineReason::No));
+        assert!(t.offline_reported.load(Ordering::Relaxed));
+
+        // ksni retries; the journal must not get one line per retry.
+        assert!(t.watcher_offline(OfflineReason::No));
+        assert!(t.offline_reported.load(Ordering::Relaxed));
+
+        // A host appearing re-arms it, so a later outage is reported again.
+        t.watcher_online();
+        assert!(!t.offline_reported.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn a_reset_note_is_empty_when_the_window_has_no_reset_time() {
+        assert_eq!(reset_note(None), "");
+        assert_eq!(
+            reset_note(Some(time::Duration::minutes(130))),
+            "  reset em 2h10"
+        );
+    }
+
+    #[test]
+    fn an_unpriced_session_shows_a_dash_instead_of_zero() {
+        let mut t = indicator();
+        t.snap.session = Some(crate::session::SessionInfo::default());
+        t.snap.quota = Some(crate::quota::Quota::default());
+
+        let labels = |t: &Indicator| {
+            t.menu()
+                .iter()
+                .filter_map(|i| match i {
+                    MenuItem::Standard(s) => Some(s.label.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+
+        assert!(labels(&t)
+            .iter()
+            .any(|l| l.starts_with("Custo est.") && l.contains('—') && !l.contains("0.00")));
+
+        t.snap.cost_usd = Some(3.42);
+        assert!(labels(&t)
+            .iter()
+            .any(|l| l == "Custo est.     US$ 3.42  (teórico)"));
     }
 }

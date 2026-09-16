@@ -240,7 +240,7 @@ fn main() {
     // placeholder percentage.
     let (snap, bar) = daemon.cycle(OffsetDateTime::now_utc());
 
-    let handle = match (tray::Indicator { bar, snap })
+    let handle = match tray::Indicator::new(bar, snap)
         .assume_sni_available(true)
         .spawn()
     {
