@@ -146,17 +146,23 @@ pub fn fetch(agent: &ureq::Agent, token: &str) -> Result<Quota, FetchError> {
         Err(e) => return Err(FetchError::Network(e.to_string())),
     };
 
-    parse_usage(body.as_bytes()).map_err(|e| FetchError::Parse(e.to_string()))
+    parse_usage(body.as_bytes()).map_err(FetchError::Parse)
 }
 
 /// Parses the quota endpoint response.
 ///
 /// The endpoint is undocumented and ships codenamed keys that are mostly
-/// null. Every field is optional on purpose: an unknown shape degrades to
-/// zeros, it never fails the daemon.
-pub fn parse_usage(bytes: &[u8]) -> Result<Quota, serde_json::Error> {
-    let raw: RawUsage = serde_json::from_slice(bytes)?;
+/// null, so each individual field stays optional: a response carrying only
+/// one of the two windows still parses, and unknown keys are ignored.
+///
+/// A response carrying *none* of the windows this module reads is a
+/// different thing entirely — not a reading of zero, but a shape we no
+/// longer understand. That fails, so the caller keeps the last good reading
+/// and backs off instead of painting a confident green 0%.
+pub fn parse_usage(bytes: &[u8]) -> Result<Quota, String> {
+    let raw: RawUsage = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
 
+    let mut recognised = raw.five_hour.is_some() || raw.seven_day.is_some();
     let mut session = window_from_raw(&raw.five_hour);
     let mut weekly = window_from_raw(&raw.seven_day);
 
@@ -164,10 +170,20 @@ pub fn parse_usage(bytes: &[u8]) -> Result<Quota, serde_json::Error> {
     // so it wins over the top-level windows when present.
     for l in raw.limits.iter().flatten() {
         match l.kind.as_deref() {
-            Some("session") => session = window_from_limit(l),
-            Some("weekly_all") => weekly = window_from_limit(l),
+            Some("session") => {
+                session = window_from_limit(l);
+                recognised = true;
+            }
+            Some("weekly_all") => {
+                weekly = window_from_limit(l);
+                recognised = true;
+            }
             _ => {}
         }
+    }
+
+    if !recognised {
+        return Err("no five_hour, seven_day or limits[] window in the response".into());
     }
 
     let breakdown = raw
@@ -235,19 +251,44 @@ mod tests {
     }
 
     #[test]
-    fn everything_null_yields_zeros_not_panic() {
+    fn everything_null_is_an_error_not_a_reading_of_zero() {
+        // Null windows carry no number. Parsing them as 0% would paint a
+        // confident empty tank over whatever the user is actually at.
         let json = br#"{"five_hour":null,"seven_day":null,"limits":null,
                         "seven_day_breakdown":null}"#;
-        let q = parse_usage(json).unwrap();
-        assert_eq!(q.session.percent, 0.0);
-        assert!(q.breakdown.is_empty());
+        assert!(parse_usage(json).is_err());
     }
 
     #[test]
-    fn empty_object_yields_zeros() {
-        let q = parse_usage(b"{}").unwrap();
+    fn empty_object_is_an_error() {
+        assert!(parse_usage(b"{}").is_err());
+    }
+
+    #[test]
+    fn a_response_of_only_renamed_keys_is_an_error() {
+        // The renaming scenario: the endpoint still answers 200 with JSON,
+        // but nothing in it is a window we know how to read.
+        let json = br#"{"nimbus_quill":{"utilization":97.0},
+                        "limits":[{"kind":"invented_tomorrow","percent":97}]}"#;
+        assert!(parse_usage(json).is_err());
+    }
+
+    #[test]
+    fn one_recognised_window_is_enough_to_parse() {
+        // Tolerance is still this module's job: half a known response is a
+        // reading, not a failure. The absent half stays at its default.
+        let q = parse_usage(br#"{"five_hour":{"utilization":42.0}}"#).unwrap();
+        assert_eq!(q.session.percent, 42.0);
         assert_eq!(q.weekly.percent, 0.0);
-        assert!(q.weekly.resets_at.is_none());
+
+        let q = parse_usage(br#"{"limits":[{"kind":"weekly_all","percent":8}]}"#).unwrap();
+        assert_eq!(q.weekly.percent, 8.0);
+    }
+
+    #[test]
+    fn a_present_but_empty_window_still_counts_as_recognised() {
+        // The shape is the known one; only the number is missing.
+        assert!(parse_usage(br#"{"five_hour":{}}"#).is_ok());
     }
 
     #[test]

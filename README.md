@@ -34,9 +34,12 @@ disappear without notice**, at which point this tool may show stale, wrong,
 or no data until updated. Treat it as a convenience, not a guarantee.
 
 The response parsing is intentionally tolerant of unknown or missing
-fields — an unrecognized shape degrades to showing nothing meaningful
-rather than crashing the daemon — but it cannot protect against Anthropic
-removing or renaming the fields this tool actually reads.
+fields: unknown keys are ignored, and half a known response still reads as
+a reading. But a response containing **none** of the fields this tool reads
+is treated as a failed poll, not as a reading of 0% — the panel keeps the
+last good value, labels it with its age, and backs off. A green `0% · 0%`
+would be the one wrong thing to show if Anthropic renames those fields
+while your weekly quota is nearly spent.
 
 ## Credentials: read-only, always
 
