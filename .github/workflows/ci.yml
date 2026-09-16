@@ -1,5 +1,13 @@
 name: ci
-on: workflow_dispatch   # CI kept but not auto-running: GitHub Actions minutes are tight
+# Manual-trigger only: GitHub Actions minutes are tight. `release_tag` is
+# only needed for the release job below; leave it empty for a plain check.
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Tag to attach the release binary to (leave empty to skip the release job)"
+        required: false
+        type: string
 jobs:
   check:
     runs-on: ubuntu-latest
@@ -11,3 +19,19 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy -- -D warnings
       - run: cargo test
+
+  release:
+    if: ${{ github.event.inputs.release_tag != '' }}
+    needs: check
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --release
+      - run: cp target/release/claude-usage claude-usage-x86_64-unknown-linux-gnu
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.release_tag }}
+          files: claude-usage-x86_64-unknown-linux-gnu
