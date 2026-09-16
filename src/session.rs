@@ -92,6 +92,12 @@ impl Tailer {
         }
     }
 
+    /// The transcript this tailer is following. Callers compare it against a
+    /// fresh `discover_active` to notice the active session moved.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
     /// Reads whatever was appended since the last call and folds it in.
     ///
     /// A trailing partial line is left unconsumed: the offset only advances
