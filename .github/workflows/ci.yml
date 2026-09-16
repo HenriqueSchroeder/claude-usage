@@ -1,5 +1,5 @@
 name: ci
-on: [push, pull_request]
+on: workflow_dispatch   # CI kept but not auto-running: GitHub Actions minutes are tight
 jobs:
   check:
     runs-on: ubuntu-latest
