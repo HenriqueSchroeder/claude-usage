@@ -17,7 +17,9 @@ jobs:
         with:
           components: rustfmt, clippy
       - run: cargo fmt --check
-      - run: cargo clippy -- -D warnings
+      # --all-targets so test code is linted too: the local gate uses it and
+      # CI must not be the weaker of the two.
+      - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
 
   release:
