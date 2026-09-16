@@ -1,5 +1,6 @@
 mod config;
 mod creds;
+mod diag;
 mod events;
 mod icon;
 mod notify;
@@ -49,26 +50,17 @@ struct Daemon {
     /// instead of a fresh-looking zero.
     last_quota: Option<quota::Quota>,
     last_ok: Option<Instant>,
-    last_note: Option<String>,
+    notes: diag::Notes,
     failures: u32,
 }
 
 impl Daemon {
-    /// Prints a diagnostic only when it differs from the previous one, so a
-    /// permanently broken setup does not write one identical line per poll.
-    fn note(&mut self, msg: String) {
-        if self.last_note.as_deref() != Some(msg.as_str()) {
-            eprintln!("claude-usage: {msg}");
-            self.last_note = Some(msg);
-        }
-    }
-
     fn read_quota(&mut self, snap: &mut Snapshot) {
         let token = match creds::read_access_token(&self.creds_path) {
             Ok(t) => t,
             Err(e) => {
                 snap.health = Health::NoCredentials;
-                self.note(match e {
+                self.notes.say(match e {
                     creds::CredsError::Missing => "credentials file not found".into(),
                     creds::CredsError::Unreadable(m) => format!("credentials unreadable: {m}"),
                     creds::CredsError::Malformed(m) => format!("credentials malformed: {m}"),
@@ -83,7 +75,7 @@ impl Daemon {
                 self.last_quota = Some(q);
                 self.last_ok = Some(Instant::now());
                 self.failures = 0;
-                self.last_note = None;
+                self.notes.clear();
             }
             Err(e) => self.note_failure(snap, e),
         }
@@ -101,15 +93,16 @@ impl Daemon {
         match e {
             quota::FetchError::Unauthorized => {
                 snap.health = Health::Unauthorized;
-                self.note("token rejected by the usage endpoint".into());
+                self.notes
+                    .say("token rejected by the usage endpoint".into());
             }
             quota::FetchError::Network(m) => {
                 snap.health = stale;
-                self.note(format!("network: {m}"));
+                self.notes.say(format!("network: {m}"));
             }
             quota::FetchError::Parse(m) => {
                 snap.health = stale;
-                self.note(format!("unreadable response: {m}"));
+                self.notes.say(format!("unreadable response: {m}"));
             }
         }
     }
@@ -232,7 +225,7 @@ fn main() {
         cfg,
         last_quota: None,
         last_ok: None,
-        last_note: None,
+        notes: diag::Notes::default(),
         failures: 0,
     };
 
@@ -309,7 +302,7 @@ mod tests {
             notifier: None,
             last_quota,
             last_ok: None,
-            last_note: None,
+            notes: diag::Notes::default(),
             failures: 0,
         }
     }

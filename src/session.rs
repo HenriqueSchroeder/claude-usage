@@ -83,6 +83,7 @@ pub struct Tailer {
     path: PathBuf,
     offset: u64,
     info: SessionInfo,
+    notes: crate::diag::Notes,
 }
 
 /// Finds the most recently modified session transcript.
@@ -122,7 +123,13 @@ impl Tailer {
                 session_id,
                 ..Default::default()
             },
+            notes: crate::diag::Notes::default(),
         }
+    }
+
+    fn note(&mut self, what: &str) {
+        let msg = format!("transcript {}: {what}", self.path.display());
+        self.notes.say(msg);
     }
 
     /// The transcript this tailer is following. Callers compare it against a
@@ -137,11 +144,27 @@ impl Tailer {
     /// past complete lines, so the next call sees the line whole. Without
     /// this, a line split across two writes would be dropped or
     /// double-counted.
+    ///
+    /// Nothing here is fatal — a transcript that cannot be read leaves the
+    /// last known info standing — but nothing here is silent either: an
+    /// unreadable transcript used to be indistinguishable from an idle one.
     pub fn poll(&mut self) -> &SessionInfo {
-        let Ok(file) = std::fs::File::open(&self.path) else {
-            return &self.info;
+        let file = match std::fs::File::open(&self.path) {
+            Ok(f) => f,
+            Err(e) => {
+                self.note(&format!("cannot open: {e}"));
+                return &self.info;
+            }
         };
-        let len = file.metadata().map(|m| m.len()).unwrap_or(0);
+        let len = match file.metadata().map(|m| m.len()) {
+            Ok(n) => n,
+            // Treating a failed stat as len 0 would read as a truncation and
+            // throw away everything accumulated so far.
+            Err(e) => {
+                self.note(&format!("cannot read size: {e}"));
+                return &self.info;
+            }
+        };
 
         if len < self.offset {
             self.offset = 0;
@@ -157,12 +180,15 @@ impl Tailer {
         }
 
         let mut reader = BufReader::new(file);
-        if reader.seek(SeekFrom::Start(self.offset)).is_err() {
+        if let Err(e) = reader.seek(SeekFrom::Start(self.offset)) {
+            self.note(&format!("cannot seek to {}: {e}", self.offset));
             return &self.info;
         }
 
         let mut consumed = self.offset;
         let mut buf = Vec::new();
+        let mut unparsable = false;
+        let mut failure = None;
         loop {
             buf.clear();
             match reader.read_until(b'\n', &mut buf) {
@@ -172,21 +198,37 @@ impl Tailer {
                         break; // partial line: leave the offset before it
                     }
                     consumed += n as u64;
-                    self.fold(&buf);
+                    unparsable |= !self.fold(&buf);
                 }
-                Err(_) => break,
+                Err(e) => {
+                    failure = Some(format!("read failed: {e}"));
+                    break;
+                }
             }
         }
         self.offset = consumed;
+
+        match failure {
+            Some(f) => self.note(&f),
+            // No count in the message: a transcript producing junk would
+            // otherwise print a fresh line every time the tally moved.
+            None if unparsable => self.note("skipped unparsable line(s)"),
+            // A clean read forgets the last complaint, so the same problem
+            // coming back is reported again rather than deduped away.
+            None => self.notes.clear(),
+        }
         &self.info
     }
 
-    fn fold(&mut self, raw: &[u8]) {
+    /// Folds one complete line in. `false` means the line was not JSON at
+    /// all, which the caller reports; a well-formed line this module has no
+    /// use for is not a problem and returns `true`.
+    fn fold(&mut self, raw: &[u8]) -> bool {
         let Ok(line) = serde_json::from_slice::<RawLine>(raw) else {
-            return;
+            return false;
         };
         if line.kind.as_deref() != Some("assistant") {
-            return;
+            return true;
         }
         if let Some(cwd) = line.cwd {
             if let Some(name) = Path::new(&cwd).file_name().and_then(|s| s.to_str()) {
@@ -199,7 +241,7 @@ impl Tailer {
             self.info.started_at.get_or_insert(ts);
             self.info.last_at = Some(ts);
         }
-        let Some(msg) = line.message else { return };
+        let Some(msg) = line.message else { return true };
         if let Some(m) = msg.model {
             self.info.model = m;
         }
@@ -214,6 +256,7 @@ impl Tailer {
             let model = self.info.model.clone();
             self.info.by_model.entry(model).or_default().add(&t);
         }
+        true
     }
 }
 
@@ -376,6 +419,38 @@ mod tests {
     fn missing_file_yields_empty_not_panic() {
         let mut t = Tailer::new("/nonexistent/x.jsonl".into());
         assert_eq!(t.poll().tokens.output, 0);
+    }
+
+    #[test]
+    fn an_unreadable_transcript_is_reported_once_not_once_per_poll() {
+        let mut t = Tailer::new("/nonexistent/x.jsonl".into());
+        t.poll();
+        let first = t.notes.last_message().map(str::to_string);
+        assert!(
+            first.as_deref().is_some_and(|m| m.contains("cannot open")),
+            "an unreadable transcript must not look like an idle session: {first:?}"
+        );
+
+        // Same failure next poll: remembered, so the journal gets one line.
+        t.poll();
+        assert_eq!(t.notes.last_message().map(str::to_string), first);
+    }
+
+    #[test]
+    fn junk_lines_are_reported_and_a_clean_read_clears_it() {
+        let p = scratch("junkreport");
+        std::fs::write(&p, format!("{{oops\n{}\n", line("claude-opus-5", 6))).unwrap();
+        let mut t = Tailer::new(p.clone());
+        t.poll();
+        assert!(t
+            .notes
+            .last_message()
+            .is_some_and(|m| m.contains("unparsable")));
+
+        // Nothing new to read, nothing wrong: the complaint is withdrawn.
+        t.poll();
+        assert_eq!(t.notes.last_message(), None);
+        std::fs::remove_file(p).ok();
     }
 
     #[test]
