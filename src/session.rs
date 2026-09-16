@@ -111,7 +111,15 @@ impl Tailer {
 
         if len < self.offset {
             self.offset = 0;
-            self.info.tokens = Tokens::default();
+            // Reset the whole accumulated content state, not just tokens:
+            // a rotated file starts a new session, so nothing derived from
+            // the old file's lines (started_at, last_at, model, project)
+            // should survive. session_id is derived from the path, not the
+            // content, so it is carried over.
+            self.info = SessionInfo {
+                session_id: std::mem::take(&mut self.info.session_id),
+                ..Default::default()
+            };
         }
 
         let mut reader = BufReader::new(file);
@@ -180,6 +188,15 @@ mod tests {
     fn line(model: &str, out: u64) -> String {
         format!(
             r#"{{"type":"assistant","timestamp":"2026-09-15T14:43:12.045Z","cwd":"/home/x/proj",
+                "message":{{"model":"{model}","usage":{{"input_tokens":2,"output_tokens":{out},
+                "cache_read_input_tokens":100,"cache_creation_input_tokens":50}}}}}}"#
+        )
+        .replace('\n', "")
+    }
+
+    fn line_with_ts(model: &str, ts: &str, out: u64) -> String {
+        format!(
+            r#"{{"type":"assistant","timestamp":"{ts}","cwd":"/home/x/proj",
                 "message":{{"model":"{model}","usage":{{"input_tokens":2,"output_tokens":{out},
                 "cache_read_input_tokens":100,"cache_creation_input_tokens":50}}}}}}"#
         )
@@ -260,6 +277,38 @@ mod tests {
 
         std::fs::write(&p, format!("{}\n", line("claude-opus-5", 4))).unwrap();
         assert_eq!(t.poll().tokens.output, 4);
+        std::fs::remove_file(p).ok();
+    }
+
+    #[test]
+    fn truncation_resets_started_at() {
+        let p = scratch("trunc_ts");
+        std::fs::write(
+            &p,
+            format!(
+                "{}\n",
+                line_with_ts("claude-opus-5", "2026-09-15T14:43:12.045Z", 10)
+            ),
+        )
+        .unwrap();
+        let mut t = Tailer::new(p.clone());
+        assert!(t.poll().started_at.is_some());
+
+        // Shorter new content forces len < offset, i.e. a real truncation/rotation.
+        std::fs::write(
+            &p,
+            format!(
+                "{}\n",
+                line_with_ts("claude-opus-5", "2026-09-16T09:00:00.000Z", 4)
+            ),
+        )
+        .unwrap();
+        let expected = OffsetDateTime::parse(
+            "2026-09-16T09:00:00.000Z",
+            &time::format_description::well_known::Rfc3339,
+        )
+        .unwrap();
+        assert_eq!(t.poll().started_at, Some(expected));
         std::fs::remove_file(p).ok();
     }
 
