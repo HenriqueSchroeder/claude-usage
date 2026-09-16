@@ -59,6 +59,18 @@ pub fn human_duration(d: time::Duration) -> String {
     }
 }
 
+/// How old the reading on screen is.
+///
+/// Integer division renders the first minute of an outage as `0m`, which
+/// reads as "just now" — the one message a staleness marker must not send.
+pub fn stale_age(seconds: u64) -> String {
+    if seconds < 60 {
+        "<1m".into()
+    } else {
+        format!("{}m", seconds / 60)
+    }
+}
+
 fn expand(template: &str, snap: &Snapshot, now: OffsetDateTime) -> String {
     let until = |d: Option<time::Duration>| d.map_or_else(|| NO_VALUE.into(), human_duration);
     let session = snap.session.as_ref();
@@ -137,7 +149,7 @@ pub fn render(cfg: &BarConfig, snap: &Snapshot, now: OffsetDateTime) -> BarOutpu
 
     let mut text = expand(template, snap, now);
     if let Health::Stale { seconds } = snap.health {
-        text.push_str(&format!(" · {}m", seconds / 60));
+        text.push_str(&format!(" · {}", stale_age(seconds)));
     }
 
     BarOutput {
@@ -348,6 +360,14 @@ mod tests {
         let mut s = snap(24.0, 98.0);
         s.health = crate::state::Health::Stale { seconds: 180 };
         assert_eq!(render(&cfg, &s, NOW).text, "24% · 3m");
+    }
+
+    #[test]
+    fn the_first_minute_of_an_outage_does_not_read_as_fresh() {
+        // "· 0m" says "just now" about a reading that is already wrong.
+        assert_eq!(stale_age(0), "<1m");
+        assert_eq!(stale_age(59), "<1m");
+        assert_eq!(stale_age(60), "1m");
     }
 
     #[test]

@@ -65,6 +65,7 @@ fn severity_note(severity: Severity) -> &'static str {
 fn health_line(health: &Health) -> Option<String> {
     match health {
         Health::Ok => None,
+        Health::Stale { seconds } if *seconds < 60 => Some("Dados de menos de 1 min atrás".into()),
         Health::Stale { seconds } => Some(format!("Dados de {} min atrás", seconds / 60)),
         Health::Unauthorized => Some("Sem autorização — abra o Claude Code".into()),
         Health::NoCredentials => Some("Credenciais não encontradas".into()),
@@ -252,6 +253,18 @@ mod tests {
         // A host appearing re-arms it, so a later outage is reported again.
         t.watcher_online();
         assert!(!t.offline_reported.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn the_menu_does_not_call_a_fresh_outage_zero_minutes_old() {
+        assert_eq!(
+            health_line(&Health::Stale { seconds: 12 }).unwrap(),
+            "Dados de menos de 1 min atrás"
+        );
+        assert_eq!(
+            health_line(&Health::Stale { seconds: 180 }).unwrap(),
+            "Dados de 3 min atrás"
+        );
     }
 
     #[test]
