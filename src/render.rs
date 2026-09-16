@@ -1,7 +1,3 @@
-// Task 14 will wire this module into main.rs; until then nothing outside
-// the tests calls it, so allow the dead-code lint the same way state.rs does.
-#![allow(dead_code)]
-
 use crate::config::{BarConfig, Rule};
 use crate::state::{Health, Snapshot};
 use time::OffsetDateTime;
@@ -105,22 +101,21 @@ fn first_match<'a>(rules: &'a [Rule], snap: &Snapshot) -> Option<&'a Rule> {
         .find(|r| metric_value(snap, &r.metric).is_some_and(|v| v >= r.above))
 }
 
+fn problem(text: &str) -> BarOutput {
+    BarOutput {
+        text: text.into(),
+        color: Rgb(0xe0, 0x1b, 0x24),
+        effect: Effect::None,
+    }
+}
+
 pub fn render(cfg: &BarConfig, snap: &Snapshot, now: OffsetDateTime) -> BarOutput {
     match snap.health {
-        Health::Unauthorized => {
-            return BarOutput {
-                text: "⚠ reautenticar".into(),
-                color: Rgb(0xe0, 0x1b, 0x24),
-                effect: Effect::None,
-            }
-        }
-        Health::NoCredentials => {
-            return BarOutput {
-                text: "⚠ sem credencial".into(),
-                color: Rgb(0xe0, 0x1b, 0x24),
-                effect: Effect::None,
-            }
-        }
+        Health::Unauthorized => return problem("⚠ reautenticar"),
+        Health::NoCredentials => return problem("⚠ sem credencial"),
+        // No reading has ever landed. A rendered "0%" would look like a full
+        // tank, the opposite of what is known.
+        _ if snap.quota.is_none() => return problem("⚠ sem dados"),
         _ => {}
     }
 
@@ -279,6 +274,19 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(render(&cfg, &s, NOW).text, "⚠ reautenticar");
+    }
+
+    #[test]
+    fn a_stale_snapshot_with_no_reading_says_so_instead_of_zero() {
+        let cfg = BarConfig {
+            format: "{session}% · {weekly}%".into(),
+            rules: vec![],
+        };
+        let s = Snapshot {
+            health: crate::state::Health::Stale { seconds: 0 },
+            ..Default::default()
+        };
+        assert_eq!(render(&cfg, &s, NOW).text, "⚠ sem dados");
     }
 
     #[test]
