@@ -1,0 +1,148 @@
+use crate::icon::ring;
+use crate::quota::Severity;
+use crate::render::{BarOutput, Effect};
+use crate::state::{Health, Snapshot};
+use ksni::{menu::StandardItem, Icon, MenuItem, Status, Tray};
+
+/// The panel item.
+///
+/// Everything it shows is derived from `snap` and `bar` on demand; it keeps
+/// no percentages of its own, which is what stops the label and the menu
+/// from ever disagreeing.
+pub struct Indicator {
+    pub bar: BarOutput,
+    pub snap: Snapshot,
+}
+
+/// Normal and HiDPI. Hosts pick whichever matches the panel scale.
+const ICON_SIZES: [i32; 2] = [22, 44];
+
+fn info(label: String) -> MenuItem<Indicator> {
+    StandardItem {
+        label,
+        enabled: false,
+        ..Default::default()
+    }
+    .into()
+}
+
+/// The endpoint's own verdict on a window, shown beside our percentage.
+fn severity_note(severity: Severity) -> &'static str {
+    match severity {
+        Severity::Normal => "",
+        Severity::Warning => "  (atenção)",
+        Severity::Critical => "  (crítico)",
+    }
+}
+
+fn health_line(health: &Health) -> Option<String> {
+    match health {
+        Health::Ok => None,
+        Health::Stale { seconds } => Some(format!("Dados de {} min atrás", seconds / 60)),
+        Health::Unauthorized => Some("Sem autorização — abra o Claude Code".into()),
+        Health::NoCredentials => Some("Credenciais não encontradas".into()),
+    }
+}
+
+impl Indicator {
+    fn pixmaps(&self) -> Vec<Icon> {
+        ICON_SIZES
+            .iter()
+            .map(|&s| Icon {
+                width: s,
+                height: s,
+                data: ring(self.snap.weekly_pct(), self.bar.color, s as u32),
+            })
+            .collect()
+    }
+}
+
+impl Tray for Indicator {
+    fn id(&self) -> String {
+        "claude-usage".into()
+    }
+
+    fn title(&self) -> String {
+        "claude-usage".into()
+    }
+
+    /// Exported as `XAyatanaLabel`: the text the panel draws next to the
+    /// icon. Plain StatusNotifierItem hosts ignore it.
+    fn label(&self) -> String {
+        self.bar.text.clone()
+    }
+
+    fn icon_pixmap(&self) -> Vec<Icon> {
+        self.pixmaps()
+    }
+
+    /// Hosts switch to this one while the status is `NeedsAttention`; without
+    /// it they would have no icon to draw at exactly the moment the item is
+    /// meant to stand out.
+    fn attention_icon_pixmap(&self) -> Vec<Icon> {
+        self.pixmaps()
+    }
+
+    /// A `pulse` rule in the config asks the panel to emphasize the item.
+    /// StatusNotifier says that with a status, not with an animation.
+    fn status(&self) -> Status {
+        match self.bar.effect {
+            Effect::Pulse => Status::NeedsAttention,
+            Effect::None => Status::Active,
+        }
+    }
+
+    fn menu(&self) -> Vec<MenuItem<Self>> {
+        let mut items = Vec::new();
+
+        if let Some(line) = health_line(&self.snap.health) {
+            items.push(info(line));
+            items.push(MenuItem::Separator);
+        }
+
+        match self.snap.quota.as_ref() {
+            None => items.push(info("Sem dados de quota".into())),
+            Some(q) => {
+                items.push(info(format!(
+                    "Sessão 5h      {:.0}%{}",
+                    self.snap.session_pct(),
+                    severity_note(q.session.severity)
+                )));
+                items.push(info(format!(
+                    "Semanal        {:.0}%{}",
+                    self.snap.weekly_pct(),
+                    severity_note(q.weekly.severity)
+                )));
+                for row in &q.breakdown {
+                    if row.percent > 0.0 {
+                        items.push(info(format!("  {}  {:.0}%", row.display_name, row.percent)));
+                    }
+                }
+            }
+        }
+
+        if let Some(s) = self.snap.session.as_ref() {
+            items.push(MenuItem::Separator);
+            items.push(info(format!("Sessão ativa   {}", s.project)));
+            items.push(info(format!(
+                "Tokens         {} in · {} out · {} cache",
+                s.tokens.input, s.tokens.output, s.tokens.cache_read
+            )));
+            items.push(info(format!(
+                "Custo est.     US$ {:.2}  (teórico)",
+                self.snap.cost_usd
+            )));
+        }
+
+        items.push(MenuItem::Separator);
+        items.push(
+            StandardItem {
+                label: "Sair".into(),
+                activate: Box::new(|_| std::process::exit(0)),
+                ..Default::default()
+            }
+            .into(),
+        );
+        items
+    }
+}
