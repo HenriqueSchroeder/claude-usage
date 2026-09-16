@@ -21,6 +21,9 @@ impl Tokens {
 
 /// Price per million tokens: (input, output).
 /// Cache read is input/10; cache creation is input * 1.25.
+/// WARNING: Matching is by prefix (model.starts_with(id)). No id may be a
+/// prefix of another: if violated, a shorter entry silently shadows the
+/// longer one and returns the wrong price with no error.
 const PRICES: &[(&str, f64, f64)] = &[
     ("claude-opus-5", 15.0, 75.0),
     ("claude-fable-5-1", 15.0, 75.0),
