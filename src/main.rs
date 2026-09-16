@@ -4,6 +4,7 @@ use ksni::Tray;
 mod config;
 mod creds;
 mod events;
+mod icon;
 mod notify;
 mod pricing;
 mod quota;
