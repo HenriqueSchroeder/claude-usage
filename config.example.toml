@@ -1,0 +1,68 @@
+# Example config for claude-usage.
+#
+# Copy to ~/.config/claude-usage/config.toml and edit. Every key below is
+# optional: a missing file, a missing key, or a file that fails to parse
+# falls back to the default shown here, and the daemon still starts.
+#
+# All values below are the built-in defaults unless noted otherwise.
+
+# How often to poll the quota endpoint and re-check the active session, in
+# seconds. Values below 10 are floored to 10 to avoid a request flood.
+poll_seconds = 60
+
+[bar]
+# Template for the text drawn on the panel next to the icon (exported as the
+# XAyatanaLabel; plain StatusNotifierItem hosts that don't read that
+# property won't show it). Placeholders: {session}, {weekly}, {reset},
+# {cost}, {project}, {model}, {tokens}. An unknown placeholder, e.g. a typo,
+# is left literal in the output instead of vanishing, so mistakes are
+# visible.
+format = "{session}% · {weekly}%"
+
+# Optional rules that override the format and/or color when a metric crosses
+# a value. Rules are checked top to bottom; the first match wins. `metric`
+# is one of "session", "weekly", "cost". `color` is a "#rrggbb" hex string.
+#
+# `effect = "pulse"` is real but modest: it sets the StatusNotifierItem
+# status to NeedsAttention instead of Active. Whether a host renders that
+# any differently (some flash the icon, most don't) is up to the host — this
+# is NOT an animation drawn by claude-usage itself.
+#
+# [[bar.rules]]
+# metric = "weekly"
+# above = 90
+# color = "#e5a50a"
+# effect = "pulse"
+#
+# [[bar.rules]]
+# metric = "weekly"
+# above = 95
+# format = "⚠ {weekly}%"
+# color = "#e01b24"
+
+[threshold]
+# Percentages, per metric (session and weekly independently), that trigger a
+# desktop notification when crossed upward.
+levels = [75, 90, 95]
+# A crossed level stays "armed" (won't refire) until the metric drops this
+# many points below it, so a value oscillating right at a level doesn't spam
+# notifications.
+hysteresis = 2.0
+# Whether crossing a level in `levels` fires a desktop notification. This
+# works.
+notify = true
+
+[reset]
+# Whether a window rolling over (session or weekly resetting to 0) fires a
+# desktop notification. This works.
+notify = true
+
+# --- Reserved, not implemented yet ---
+# `effect` and `duration` are parsed but currently IGNORED. The pulse
+# animation they were meant to configure was never wired up (the code that
+# would have drawn it, icon::pulse_frames, was removed as dead code); no
+# visual change happens on a window reset today beyond the notification
+# above. Setting these keys has no effect. They are kept here so an existing
+# config keeps parsing if a future version wires them up.
+effect = "pulse"
+duration = 2

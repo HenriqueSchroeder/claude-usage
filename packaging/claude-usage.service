@@ -1,0 +1,15 @@
+[Unit]
+Description=Claude Code quota indicator
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/claude-usage
+# The daemon exits 1 on purpose whenever it loses the tray connection (e.g.
+# GNOME Shell restarting), so it must always come back, not just on failure.
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=graphical-session.target
