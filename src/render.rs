@@ -71,6 +71,11 @@ pub fn stale_age(seconds: u64) -> String {
     }
 }
 
+fn some_or_dash(v: Option<String>) -> String {
+    v.filter(|s| !s.is_empty())
+        .unwrap_or_else(|| NO_VALUE.into())
+}
+
 fn expand(template: &str, snap: &Snapshot, now: OffsetDateTime) -> String {
     let until = |d: Option<time::Duration>| d.map_or_else(|| NO_VALUE.into(), human_duration);
     let session = snap.session.as_ref();
@@ -101,9 +106,15 @@ fn expand(template: &str, snap: &Snapshot, now: OffsetDateTime) -> String {
                 Some(c) => format!("{c:.2}"),
                 None => NO_VALUE.into(),
             }),
-            "project" => session.map(|s| s.project.clone()),
-            "model" => session.map(|s| s.model.clone()),
-            "tokens" => session.map(|s| format!("{}", s.tokens.output)),
+            // A known placeholder with nothing behind it renders as a dash,
+            // not as itself: with no session running these are empty every
+            // day, and a literal "{project}" on the panel reads as a broken
+            // program rather than as "no session".
+            "project" => Some(some_or_dash(session.map(|s| s.project.clone()))),
+            "model" => Some(some_or_dash(session.map(|s| s.model.clone()))),
+            "tokens" => Some(some_or_dash(
+                session.map(|s| format!("{}", s.tokens.output)),
+            )),
             _ => None,
         };
         match value {
@@ -251,6 +262,17 @@ mod tests {
         };
         // snap() sets only the session window's reset.
         assert_eq!(render(&cfg, &snap(1.0, 1.0), NOW).text, "—");
+    }
+
+    #[test]
+    fn session_placeholders_render_a_dash_when_no_session_is_running() {
+        let cfg = BarConfig {
+            format: "{project} {model} {tokens} {cost}".into(),
+            rules: vec![],
+        };
+        // The everyday case now that a finished session drops out of the
+        // snapshot: a literal "{project}" would look like a broken program.
+        assert_eq!(render(&cfg, &snap(24.0, 80.0), NOW).text, "— — — —");
     }
 
     #[test]

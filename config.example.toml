@@ -30,7 +30,9 @@ poll_seconds = 60
 #                     the menu, so any of these can be checked.
 #   {cost}            session cost estimate, or "—" if a model in the
 #                     session has no known price
-#   {project}, {model}, {tokens}   from the active session
+#   {project}, {model}, {tokens}   from the active session; all three
+#                     render "—" while no session is running, which is the
+#                     normal state whenever you are not mid-task
 format = "{session}% · {weekly}%"
 
 # Optional rules that override the format and/or color when a metric crosses
