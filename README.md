@@ -94,17 +94,26 @@ nested under an `[events]` table):
 |---|---|---|
 | `poll_seconds` | `60` | Floored to 10 |
 | `[bar].format` | `"{session}% · {weekly}%"` | Placeholders: `{session}`, `{weekly}`, `{reset}`, `{cost}`, `{project}`, `{model}`, `{tokens}` |
-| `[bar].rules` | `[]` | Per-metric overrides for format/color/effect, first match wins |
+| `[bar].rules` | `[]` | Array of `{metric, above, format?, color?, effect?}`; first match (top to bottom) wins |
+| `[bar].rules[].effect` | `"pulse"` (opt-in per rule) | **Works** — flips the tray status to `NeedsAttention`; see note below |
 | `[threshold].levels` | `[75, 90, 95]` | Percentages that trigger a notification |
 | `[threshold].hysteresis` | `2.0` | Points a level must drop below itself to rearm |
 | `[threshold].notify` | `true` | Works |
 | `[reset].notify` | `true` | Works |
-| `[reset].effect` | `"pulse"` | **Inert — see below** |
-| `[reset].duration` | `2` | **Inert — see below** |
+| `[reset].effect` | `"pulse"` | **Inert** — not the same key as `[bar].rules[].effect` above; see [Not yet implemented](#not-yet-implemented) |
+| `[reset].duration` | `2` | **Inert** — same |
 
-A `bar.rules` entry's own `effect = "pulse"` is real, but modest: it flips
-the tray item's status to `NeedsAttention` (host-dependent rendering, not an
-animation this program draws).
+There are two unrelated `effect` keys in this config, and only one of them
+does anything:
+
+- `[bar].rules[].effect = "pulse"` **works today**. A matching rule sets the
+  StatusNotifierItem's status to `NeedsAttention` instead of `Active` (see
+  `src/render.rs` and `src/tray.rs::status()`). Whether the host renders
+  that any differently — some panels flash or highlight a `NeedsAttention`
+  icon, most don't — is up to the host, not this program. It is still a
+  real, wired effect, just not a custom animation.
+- `[reset].effect` and `[reset].duration` **do nothing**. See
+  [Not yet implemented](#not-yet-implemented).
 
 ## Measured footprint
 
@@ -115,12 +124,16 @@ libdbus.
 
 ## Not yet implemented
 
-- **The reset "pulse" animation.** `[reset].effect` and `[reset].duration`
-  are parsed and stored but nothing reads them — the code that would have
-  drawn an animated icon (`icon::pulse_frames`) was removed as dead code
-  during development because nothing ever called it. A window reset today
-  only produces the notification configured by `[reset].notify`, no visual
-  change.
-- Those two keys are kept in the config schema so a config file written
-  against a future version that does implement this will not need to
-  change; for now, setting them does nothing.
+- **A frame-by-frame pulse animation on window reset does not exist.**
+  `[reset].effect` and `[reset].duration` are parsed and stored, but nothing
+  in the daemon reads either field — the code that would have drawn an
+  animated icon (`icon::pulse_frames`) was removed as dead code during
+  development because nothing ever called it. A window reset today only
+  produces the notification configured by `[reset].notify`; there is no
+  accompanying visual change, animated or otherwise.
+  - This is unrelated to `[bar].rules[].effect = "pulse"` (see
+    [Configuration](#configuration)), which does work — it changes the tray
+    item's status, just not by drawing an animation.
+- The two `[reset]` keys are kept in the config schema so a config file
+  written against a future version that does implement this will not need
+  to change; for now, setting them does nothing.
