@@ -2,7 +2,17 @@ use crate::pricing::Tokens;
 use serde::Deserialize;
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use time::OffsetDateTime;
+use time::{Duration, OffsetDateTime};
+
+/// How long a transcript may go without an assistant turn before the session
+/// behind it counts as finished.
+///
+/// `discover_active` returns the newest transcript whether or not anything is
+/// still happening in it, so without this the panel presents Friday's project
+/// as Monday's current session. Claude Code appends an assistant line on every
+/// turn, so a session actually being worked on is never quiet for long; half an
+/// hour survives a lunch break taken mid-task and still clears overnight.
+const IDLE_CUTOFF: Duration = Duration::minutes(30);
 
 #[derive(Debug, Clone, Default)]
 pub struct SessionInfo {
@@ -12,6 +22,23 @@ pub struct SessionInfo {
     pub last_at: Option<OffsetDateTime>,
     pub tokens: Tokens,
     pub model: String,
+}
+
+impl SessionInfo {
+    /// Whether this transcript is still being written to.
+    ///
+    /// A transcript with no assistant line at all has no activity to measure,
+    /// so it is not active either — that is the brand-new file holding nothing
+    /// but the user's first prompt, which would otherwise render as a live
+    /// session with no project and no cost.
+    pub fn is_active(&self, now: OffsetDateTime) -> bool {
+        self.last_at.is_some_and(|t| now - t < IDLE_CUTOFF)
+    }
+
+    /// How long the session has been running: first assistant turn to last.
+    pub fn elapsed(&self) -> Option<Duration> {
+        self.started_at.zip(self.last_at).map(|(a, b)| b - a)
+    }
 }
 
 #[derive(Deserialize)]
@@ -185,6 +212,7 @@ impl Tailer {
 mod tests {
     use super::*;
     use std::io::Write;
+    use time::macros::datetime;
 
     fn line(model: &str, out: u64) -> String {
         format!(
@@ -339,5 +367,55 @@ mod tests {
     fn missing_file_yields_empty_not_panic() {
         let mut t = Tailer::new("/nonexistent/x.jsonl".into());
         assert_eq!(t.poll().tokens.output, 0);
+    }
+
+    #[test]
+    fn a_session_quiet_for_too_long_is_not_active() {
+        let p = scratch("idle");
+        std::fs::write(
+            &p,
+            format!(
+                "{}\n",
+                line_with_ts("claude-opus-5", "2026-09-15T14:43:12.045Z", 10)
+            ),
+        )
+        .unwrap();
+        let mut t = Tailer::new(p.clone());
+        let info = t.poll().clone();
+
+        // Ten minutes after the last turn: still the session in front of you.
+        assert!(info.is_active(datetime!(2026-09-15 14:53:12 UTC)));
+        // The next morning: Friday's project is not today's session.
+        assert!(!info.is_active(datetime!(2026-09-16 09:00:00 UTC)));
+        std::fs::remove_file(p).ok();
+    }
+
+    #[test]
+    fn a_transcript_with_no_assistant_line_is_not_active() {
+        let p = scratch("useronly");
+        std::fs::write(&p, "{\"type\":\"user\"}\n{\"type\":\"user\"}\n").unwrap();
+        let mut t = Tailer::new(p.clone());
+        let info = t.poll().clone();
+
+        assert!(info.last_at.is_none());
+        assert!(!info.is_active(datetime!(2026-09-15 14:43:12 UTC)));
+        std::fs::remove_file(p).ok();
+    }
+
+    #[test]
+    fn elapsed_spans_the_first_turn_to_the_last() {
+        let p = scratch("elapsed");
+        std::fs::write(
+            &p,
+            format!(
+                "{}\n{}\n",
+                line_with_ts("claude-opus-5", "2026-09-15T14:05:00.000Z", 10),
+                line_with_ts("claude-opus-5", "2026-09-15T14:43:00.000Z", 5)
+            ),
+        )
+        .unwrap();
+        let mut t = Tailer::new(p.clone());
+        assert_eq!(t.poll().elapsed().map(|d| d.whole_minutes()), Some(38));
+        std::fs::remove_file(p).ok();
     }
 }

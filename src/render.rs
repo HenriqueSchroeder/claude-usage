@@ -44,7 +44,7 @@ fn metric_value(snap: &Snapshot, metric: &str) -> Option<f32> {
     }
 }
 
-fn human_duration(d: time::Duration) -> String {
+pub fn human_duration(d: time::Duration) -> String {
     let total = d.whole_minutes().max(0);
     if total >= 60 {
         format!("{}h{:02}", total / 60, total % 60)

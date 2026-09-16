@@ -1,6 +1,6 @@
 use crate::icon::ring;
 use crate::quota::Severity;
-use crate::render::{BarOutput, Effect};
+use crate::render::{human_duration, BarOutput, Effect};
 use crate::state::{Health, Snapshot};
 use ksni::{menu::StandardItem, Icon, MenuItem, Status, Tray};
 
@@ -137,7 +137,11 @@ impl Tray for Indicator {
 
         if let Some(s) = self.snap.session.as_ref() {
             items.push(MenuItem::Separator);
-            items.push(info(format!("Sessão ativa   {}", s.project)));
+            let age = s
+                .elapsed()
+                .map(|d| format!(" · {}", human_duration(d)))
+                .unwrap_or_default();
+            items.push(info(format!("Sessão ativa   {}{age}", s.project)));
             items.push(info(format!(
                 "Tokens         {} in · {} out · {} cache",
                 s.tokens.input, s.tokens.output, s.tokens.cache_read

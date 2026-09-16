@@ -138,7 +138,7 @@ impl Daemon {
     /// One poll: read the quota, fold in the active session, notify on what
     /// changed, and render the bar. Never fails; every problem it meets ends
     /// up in `Snapshot::health`.
-    fn cycle(&mut self) -> (Snapshot, render::BarOutput) {
+    fn cycle(&mut self, now: OffsetDateTime) -> (Snapshot, render::BarOutput) {
         let mut snap = Snapshot::default();
         self.read_quota(&mut snap);
         // The last good reading outlives a failed poll; `health` is what says
@@ -148,8 +148,13 @@ impl Daemon {
         self.refresh_tailer();
         if let Some(t) = self.tailer.as_mut() {
             let info = t.poll().clone();
-            snap.cost_usd = pricing::cost_usd(&info.model, &info.tokens);
-            snap.session = Some(info);
+            // The newest transcript is not the same thing as a live session.
+            // A finished one leaves the snapshot empty, and the menu's whole
+            // session section disappears with it.
+            if info.is_active(now) {
+                snap.cost_usd = pricing::cost_usd(&info.model, &info.tokens);
+                snap.session = Some(info);
+            }
         }
 
         let events = self.detector.diff(&snap);
@@ -158,7 +163,7 @@ impl Daemon {
         }
         self.detector.save(&self.state_path);
 
-        let bar = render::render(&self.cfg.bar, &snap, OffsetDateTime::now_utc());
+        let bar = render::render(&self.cfg.bar, &snap, now);
         (snap, bar)
     }
 
@@ -193,7 +198,7 @@ fn main() {
 
     // First reading before the item appears, so the panel never shows a
     // placeholder percentage.
-    let (snap, bar) = daemon.cycle();
+    let (snap, bar) = daemon.cycle(OffsetDateTime::now_utc());
 
     let handle = match (tray::Indicator { bar, snap })
         .assume_sni_available(true)
@@ -208,7 +213,7 @@ fn main() {
 
     loop {
         std::thread::sleep(Duration::from_secs(daemon.wait_seconds()));
-        let (snap, bar) = daemon.cycle();
+        let (snap, bar) = daemon.cycle(OffsetDateTime::now_utc());
         let updated = handle.update(move |t: &mut tray::Indicator| {
             t.bar = bar;
             t.snap = snap;
@@ -228,6 +233,11 @@ mod tests {
     use super::*;
     use std::path::Path;
     use std::time::SystemTime;
+    use time::macros::datetime;
+
+    /// Shortly after the timestamp `write_transcript` puts in every line, so
+    /// the session those lines describe counts as live.
+    const NOW: OffsetDateTime = datetime!(2026-09-15 14:50 UTC);
 
     #[test]
     fn backoff_doubles_and_caps_at_fifteen_minutes() {
@@ -271,7 +281,7 @@ mod tests {
         q.weekly.percent = 83.0;
         let mut d = offline_daemon(&dir, Some(q));
 
-        let (snap, bar) = d.cycle();
+        let (snap, bar) = d.cycle(NOW);
 
         // The credentials are gone, and health says exactly that...
         assert_eq!(snap.health, Health::NoCredentials);
@@ -286,7 +296,7 @@ mod tests {
     #[test]
     fn a_failed_poll_with_nothing_ever_read_carries_no_quota() {
         let dir = scratch("nocarry");
-        let (snap, bar) = offline_daemon(&dir, None).cycle();
+        let (snap, bar) = offline_daemon(&dir, None).cycle(NOW);
         assert!(snap.quota.is_none());
         assert_eq!(bar.text, "⚠ sem credencial");
         std::fs::remove_dir_all(dir).ok();
@@ -316,20 +326,43 @@ mod tests {
         let new = dir.join("projects/today/b.jsonl");
         let t0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
 
-        // At startup the newest transcript is yesterday's finished session.
+        // At startup the newest transcript is the one written most recently.
         write_transcript(&old, 10, t0);
         let mut d = offline_daemon(&dir, None);
-        assert_eq!(d.cycle().0.session.unwrap().tokens.output, 10);
+        assert_eq!(d.cycle(NOW).0.session.unwrap().tokens.output, 10);
 
         // An unchanged path must keep its tailer: rebuilding would re-read the
-        // file from zero and double every total.
-        assert_eq!(d.cycle().0.session.unwrap().tokens.output, 10);
+        // whole file from offset zero on every poll, which is the I/O this
+        // tailer exists to avoid. (It would not double the totals — `fold`
+        // re-derives them from the full content and lands on the same number.)
+        assert_eq!(d.cycle(NOW).0.session.unwrap().tokens.output, 10);
 
         // A session started after the daemon takes over on the next poll.
         write_transcript(&new, 7, t0 + Duration::from_secs(60));
-        let session = d.cycle().0.session.unwrap();
+        let session = d.cycle(NOW).0.session.unwrap();
         assert_eq!(session.tokens.output, 7);
         assert!(d.tailer.as_ref().map(session::Tailer::path) == Some(new.as_path()));
+
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn a_session_that_went_quiet_drops_out_of_the_snapshot() {
+        let dir = scratch("stale-session");
+        let t = dir.join("projects/friday/a.jsonl");
+        write_transcript(
+            &t,
+            10,
+            SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000),
+        );
+        let mut d = offline_daemon(&dir, None);
+
+        // Minutes after the last turn, it is the session on screen.
+        assert!(d.cycle(NOW).0.session.is_some());
+
+        // The next morning the same file is still the newest transcript on
+        // disk, and it is still not a session anybody is in.
+        assert!(d.cycle(datetime!(2026-09-16 09:00 UTC)).0.session.is_none());
 
         std::fs::remove_dir_all(dir).ok();
     }
