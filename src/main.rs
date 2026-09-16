@@ -21,6 +21,9 @@ const BACKOFF_CAP_SECONDS: u64 = 900;
 /// a request flood.
 const MIN_POLL_SECONDS: u64 = 10;
 const HTTP_TIMEOUT: Duration = Duration::from_secs(15);
+/// How often to re-stat `.credentials.json` while backing off. Only while
+/// backing off — a healthy loop sleeps through its whole interval.
+const CREDS_CHECK_INTERVAL: Duration = Duration::from_secs(15);
 
 fn backoff_seconds(failures: u32, base: u64) -> u64 {
     base.saturating_mul(1u64 << failures.min(10))
@@ -74,10 +77,6 @@ impl Daemon {
             }
         };
 
-        let stale = |last_ok: Option<Instant>| Health::Stale {
-            seconds: last_ok.map_or(0, |t| t.elapsed().as_secs()),
-        };
-
         match quota::fetch(&self.agent, &token) {
             Ok(q) => {
                 snap.health = Health::Ok;
@@ -86,18 +85,30 @@ impl Daemon {
                 self.failures = 0;
                 self.last_note = None;
             }
-            Err(quota::FetchError::Unauthorized) => {
+            Err(e) => self.note_failure(snap, e),
+        }
+    }
+
+    /// Records a failed poll. Counting happens here, once, for every variant:
+    /// an expired refresh token used to be exempt, which meant one 401 per
+    /// `poll_seconds`, forever, from an identifiable User-Agent against an
+    /// endpoint that is not public. Backing off is the whole point.
+    fn note_failure(&mut self, snap: &mut Snapshot, e: quota::FetchError) {
+        self.failures = self.failures.saturating_add(1);
+        let stale = Health::Stale {
+            seconds: self.last_ok.map_or(0, |t| t.elapsed().as_secs()),
+        };
+        match e {
+            quota::FetchError::Unauthorized => {
                 snap.health = Health::Unauthorized;
                 self.note("token rejected by the usage endpoint".into());
             }
-            Err(quota::FetchError::Network(m)) => {
-                snap.health = stale(self.last_ok);
-                self.failures = self.failures.saturating_add(1);
+            quota::FetchError::Network(m) => {
+                snap.health = stale;
                 self.note(format!("network: {m}"));
             }
-            Err(quota::FetchError::Parse(m)) => {
-                snap.health = stale(self.last_ok);
-                self.failures = self.failures.saturating_add(1);
+            quota::FetchError::Parse(m) => {
+                snap.health = stale;
                 self.note(format!("unreadable response: {m}"));
             }
         }
@@ -174,6 +185,35 @@ impl Daemon {
             n => backoff_seconds(n - 1, base),
         }
     }
+
+    fn creds_mtime(&self) -> Option<std::time::SystemTime> {
+        std::fs::metadata(&self.creds_path)
+            .and_then(|m| m.modified())
+            .ok()
+    }
+
+    /// Waits until the next poll is due.
+    ///
+    /// While healthy this is a plain sleep. While backing off it also watches
+    /// the credentials file: Claude Code rewrites it when the user
+    /// re-authenticates, and making them sit out a 15-minute backoff after
+    /// they have already fixed the problem is its own kind of broken.
+    fn wait(&mut self) {
+        let seconds = self.wait_seconds();
+        if self.failures == 0 {
+            std::thread::sleep(Duration::from_secs(seconds));
+            return;
+        }
+
+        let before = self.creds_mtime();
+        let deadline = Instant::now() + Duration::from_secs(seconds);
+        while let Some(left) = deadline.checked_duration_since(Instant::now()) {
+            std::thread::sleep(CREDS_CHECK_INTERVAL.min(left));
+            if self.creds_mtime() != before {
+                return;
+            }
+        }
+    }
 }
 
 fn main() {
@@ -212,7 +252,7 @@ fn main() {
     };
 
     loop {
-        std::thread::sleep(Duration::from_secs(daemon.wait_seconds()));
+        daemon.wait();
         let (snap, bar) = daemon.cycle(OffsetDateTime::now_utc());
         let updated = handle.update(move |t: &mut tray::Indicator| {
             t.bar = bar;
@@ -272,6 +312,32 @@ mod tests {
             last_note: None,
             failures: 0,
         }
+    }
+
+    #[test]
+    fn every_kind_of_failed_poll_counts_toward_the_backoff() {
+        let dir = scratch("backoff");
+        let mut d = offline_daemon(&dir, None);
+        let mut snap = Snapshot::default();
+
+        // Unauthorized used to be the exempt one: a dead refresh token meant
+        // one 401 per poll, 1440 a day, against an endpoint that is not
+        // public. It backs off like everything else now.
+        d.note_failure(&mut snap, quota::FetchError::Unauthorized);
+        assert_eq!(snap.health, Health::Unauthorized);
+        assert_eq!(d.wait_seconds(), 60);
+        d.note_failure(&mut snap, quota::FetchError::Unauthorized);
+        assert_eq!(d.wait_seconds(), 120);
+        for _ in 0..10 {
+            d.note_failure(&mut snap, quota::FetchError::Unauthorized);
+        }
+        assert_eq!(d.wait_seconds(), BACKOFF_CAP_SECONDS);
+
+        // A success clears it, so recovery is immediate.
+        d.failures = 0;
+        assert_eq!(d.wait_seconds(), 60);
+
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]
