@@ -16,10 +16,13 @@ in the top panel with two parts:
   usage percentage. It uses no image assets; every pixel is computed at
   runtime.
 
-Clicking the icon opens a menu with the session and weekly percentages
-(plus per-category breakdown rows when the endpoint reports them), the
-active Claude Code project and its token counts, and a theoretical cost
-estimate for the current session. Desktop notifications fire when a
+Clicking the icon opens a menu with the session and weekly percentages,
+each with the time until that window clears (plus per-category breakdown
+rows when the endpoint reports them), and — only while a session is
+actually running — the active Claude Code project, how long it has been
+going, its token counts and a theoretical cost estimate. When nothing has
+happened for half an hour the session block disappears rather than
+presenting yesterday's work as today's. Desktop notifications fire when a
 configured usage threshold is crossed or a quota window resets.
 
 A screenshot is pending — this was built and verified headlessly (over
@@ -138,8 +141,8 @@ anything:
 
 RSS measured on the release binary, idle, with `poll_seconds` lowered to 10
 so several session-directory rediscovery cycles land inside the
-measurement window: **6604 KB after 5 seconds, 6620 KB after 40 seconds**
-(4+ rediscovery cycles over a 2782-file project tree) — call it **~6.6 MB**,
+measurement window: **6572 KB after 5 seconds, unchanged at 45 seconds**
+(4+ rediscovery cycles over a 5326-file project tree) — call it **~6.6 MB**,
 against a 10240 KB budget. `ldd` on the release binary shows only `libc`,
 `libm`, `libgcc_s`, and the dynamic linker — no GTK, no GLib, no libdbus.
 
