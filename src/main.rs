@@ -4,6 +4,7 @@ use ksni::Tray;
 mod creds;
 mod pricing;
 mod quota;
+mod session;
 
 struct Probe;
 
