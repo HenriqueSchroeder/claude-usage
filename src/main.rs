@@ -1,6 +1,8 @@
 use ksni::blocking::TrayMethods;
 use ksni::Tray;
 
+mod creds;
+
 struct Probe;
 
 impl Tray for Probe {
