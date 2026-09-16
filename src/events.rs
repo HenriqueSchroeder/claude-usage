@@ -56,12 +56,24 @@ impl Detector {
         detector
     }
 
+    /// Writes to a sibling `.tmp` and renames over the target.
+    ///
+    /// A crash partway through a plain `fs::write` leaves a truncated file;
+    /// `load` then fails to deserialise it, falls back to a default with
+    /// `seen: false`, and treats the next poll as a first run — which is
+    /// silent by design. The threshold crossing after a bad shutdown would
+    /// simply never be announced. Rename is atomic, so a reader sees either
+    /// the old state or the new one.
     pub fn save(&self, path: &Path) {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir).ok();
         }
-        if let Ok(json) = serde_json::to_vec(&self.state) {
-            std::fs::write(path, json).ok();
+        let Ok(json) = serde_json::to_vec(&self.state) else {
+            return;
+        };
+        let tmp = path.with_extension("json.tmp");
+        if std::fs::write(&tmp, json).is_ok() && std::fs::rename(&tmp, path).is_err() {
+            std::fs::remove_file(&tmp).ok();
         }
     }
 
@@ -264,6 +276,27 @@ mod tests {
 
         let mut reloaded = Detector::load(&p, cfg());
         assert!(reloaded.diff(&snap(81.0)).is_empty());
+        std::fs::remove_file(p).ok();
+    }
+
+    #[test]
+    fn saving_leaves_no_temporary_file_behind() {
+        let mut p = std::env::temp_dir();
+        p.push(format!("cu-atomic-{}.json", std::process::id()));
+        let tmp = p.with_extension("json.tmp");
+        std::fs::remove_file(&p).ok();
+        std::fs::remove_file(&tmp).ok();
+
+        let mut d = Detector::new(cfg());
+        d.diff(&snap(80.0));
+        d.save(&p);
+        d.save(&p); // the second write must overwrite, not trip on the tmp
+
+        assert!(p.exists(), "state file should exist");
+        assert!(!tmp.exists(), "temporary file should be renamed away");
+        // And it is still readable, which is the point of the rename.
+        assert!(Detector::load(&p, cfg()).diff(&snap(81.0)).is_empty());
+
         std::fs::remove_file(p).ok();
     }
 
