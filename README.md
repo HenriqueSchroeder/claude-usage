@@ -117,10 +117,12 @@ does anything:
 
 ## Measured footprint
 
-RSS measured on the release binary, idle, polling every 10 seconds: **6604
-KB** (budget: under 10240 KB). `ldd` on the release binary shows only
-`libc`, `libm`, `libgcc_s`, and the dynamic linker — no GTK, no GLib, no
-libdbus.
+RSS measured on the release binary, idle, with `poll_seconds` lowered to 10
+so several session-directory rediscovery cycles land inside the
+measurement window: **6604 KB after 5 seconds, 6620 KB after 40 seconds**
+(4+ rediscovery cycles over a 2782-file project tree) — call it **~6.6 MB**,
+against a 10240 KB budget. `ldd` on the release binary shows only `libc`,
+`libm`, `libgcc_s`, and the dynamic linker — no GTK, no GLib, no libdbus.
 
 ## Not yet implemented
 
@@ -137,3 +139,28 @@ libdbus.
 - The two `[reset]` keys are kept in the config schema so a config file
   written against a future version that does implement this will not need
   to change; for now, setting them does nothing.
+
+## Roadmap
+
+Four things are deliberately not in v1. Listed here so "not built yet" reads
+as "not built yet," not "considered and rejected" or "the project is done":
+
+- **The reset "pulse" animation is absent.** See
+  [Not yet implemented](#not-yet-implemented) above for exactly which
+  config keys this affects (`[reset].effect`, `[reset].duration`) and why.
+- **Floating PiP overlay** — a GNOME Shell extension showing the ring
+  always on top of other windows. Not in the daemon itself because Wayland
+  doesn't let an ordinary application declare itself always-on-top:
+  `wlr-layer-shell` doesn't exist on GNOME, so a real overlay has to live
+  inside the Shell, as an extension, not as this binary.
+- **Dock badge** — a numeric badge on the dock icon via the Unity
+  `LauncherEntry` D-Bus API. It needs the app pinned to the dock to have an
+  icon to badge in the first place, which is why the panel indicator was
+  chosen for v1 instead.
+- **Usage history** — indexing the full set of past session transcripts for
+  trends over time. v1 deliberately reads only the currently active
+  session; history would need an offset cache per transcript, rotation
+  handling as old ones age out, and a graphical window to show it in, none
+  of which exist yet.
+
+No dates attached to any of these — they're documented gaps, not commitments.
