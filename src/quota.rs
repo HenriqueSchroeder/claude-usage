@@ -113,6 +113,46 @@ fn window_from_raw(w: &Option<RawWindow>) -> Window {
     }
 }
 
+pub const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
+pub const OAUTH_BETA: &str = "oauth-2025-04-20";
+pub const USER_AGENT: &str = concat!("claude-usage/", env!("CARGO_PKG_VERSION"));
+
+#[derive(Debug)]
+pub enum FetchError {
+    Unauthorized,
+    Network(String),
+    Parse(String),
+}
+
+fn map_status(code: u16, body: String) -> FetchError {
+    match code {
+        401 | 403 => FetchError::Unauthorized,
+        _ => FetchError::Network(format!("HTTP {code}: {body}")),
+    }
+}
+
+/// Fetches and parses the quota endpoint response over HTTP.
+pub fn fetch(agent: &ureq::Agent, token: &str) -> Result<Quota, FetchError> {
+    let resp = agent
+        .get(USAGE_URL)
+        .set("Authorization", &format!("Bearer {token}"))
+        .set("anthropic-beta", OAUTH_BETA)
+        .set("User-Agent", USER_AGENT)
+        .call();
+
+    let body = match resp {
+        Ok(r) => r
+            .into_string()
+            .map_err(|e| FetchError::Network(e.to_string()))?,
+        Err(ureq::Error::Status(code, r)) => {
+            return Err(map_status(code, r.into_string().unwrap_or_default()))
+        }
+        Err(e) => return Err(FetchError::Network(e.to_string())),
+    };
+
+    parse_usage(body.as_bytes()).map_err(|e| FetchError::Parse(e.to_string()))
+}
+
 /// Parses the quota endpoint response.
 ///
 /// The endpoint is undocumented and ships codenamed keys that are mostly
@@ -218,5 +258,21 @@ mod tests {
     fn reads_the_breakdown_rows() {
         let q = parse_usage(FIXTURE).unwrap();
         assert!(q.breakdown.iter().any(|r| r.display_name == "Claude Code"));
+    }
+
+    #[test]
+    fn http_401_maps_to_unauthorized() {
+        assert!(matches!(
+            map_status(401, String::new()),
+            FetchError::Unauthorized
+        ));
+    }
+
+    #[test]
+    fn other_http_errors_map_to_network() {
+        assert!(matches!(
+            map_status(503, "down".into()),
+            FetchError::Network(_)
+        ));
     }
 }
