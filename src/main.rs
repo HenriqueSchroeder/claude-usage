@@ -5,6 +5,7 @@ mod creds;
 mod pricing;
 mod quota;
 mod session;
+mod state;
 
 struct Probe;
 
