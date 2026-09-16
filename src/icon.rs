@@ -18,11 +18,6 @@ pub fn ring(percent: f32, color: Rgb, size: u32) -> Vec<u8> {
     }
     let pct = percent.clamp(0.0, 100.0) / 100.0;
     let mut out = vec![0u8; (size * size * 4) as usize];
-    if pct <= 0.0 {
-        // At 0% there is nothing to report; leave the icon fully transparent
-        // instead of showing a permanently-lit background track.
-        return out;
-    }
 
     let center = size as f32 / 2.0;
     let outer = center - 1.0;
@@ -116,9 +111,9 @@ mod tests {
     }
 
     #[test]
-    fn full_ring_has_more_opaque_pixels_than_empty() {
-        let opaque = |b: &[u8]| b.chunks(4).filter(|p| p[0] > 0).count();
-        assert!(opaque(&ring(100.0, RED, 22)) > opaque(&ring(0.0, RED, 22)));
+    fn full_ring_has_more_total_alpha_than_empty() {
+        let total_alpha = |b: &[u8]| b.chunks(4).map(|p| p[0] as u32).sum::<u32>();
+        assert!(total_alpha(&ring(100.0, RED, 22)) > total_alpha(&ring(0.0, RED, 22)));
     }
 
     #[test]
