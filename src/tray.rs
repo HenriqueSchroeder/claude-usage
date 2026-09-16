@@ -45,13 +45,27 @@ fn health_line(health: &Health) -> Option<String> {
 }
 
 impl Indicator {
+    /// How much of the ring to fill.
+    ///
+    /// `Stale` still draws the real arc — the number is the last good one and
+    /// the label says how old it is. The auth states do not: the label there
+    /// reads `⚠ reautenticar`, and an arc drawn at a percentage from before
+    /// the token died would contradict it with a plausible-looking lie.
+    fn arc_percent(&self) -> f32 {
+        match self.snap.health {
+            Health::Ok | Health::Stale { .. } => self.snap.weekly_pct(),
+            Health::Unauthorized | Health::NoCredentials => 0.0,
+        }
+    }
+
     fn pixmaps(&self) -> Vec<Icon> {
+        let percent = self.arc_percent();
         ICON_SIZES
             .iter()
             .map(|&s| Icon {
                 width: s,
                 height: s,
-                data: ring(self.snap.weekly_pct(), self.bar.color, s as u32),
+                data: ring(percent, self.bar.color, s as u32),
             })
             .collect()
     }
