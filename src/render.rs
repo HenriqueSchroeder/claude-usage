@@ -29,10 +29,13 @@ pub fn parse_color(s: &str) -> Option<Rgb> {
     if h.len() != 6 {
         return None;
     }
+    // `get` returns None on a non-char-boundary index instead of panicking,
+    // which matters here: a multi-byte character can make a 6-BYTE string
+    // that is not 6 ASCII hex digits (e.g. "1ä234").
     Some(Rgb(
-        u8::from_str_radix(&h[0..2], 16).ok()?,
-        u8::from_str_radix(&h[2..4], 16).ok()?,
-        u8::from_str_radix(&h[4..6], 16).ok()?,
+        u8::from_str_radix(h.get(0..2)?, 16).ok()?,
+        u8::from_str_radix(h.get(2..4)?, 16).ok()?,
+        u8::from_str_radix(h.get(4..6)?, 16).ok()?,
     ))
 }
 
@@ -66,6 +69,11 @@ fn expand(template: &str, snap: &Snapshot, now: OffsetDateTime) -> String {
     while let Some(start) = rest.find('{') {
         out.push_str(&rest[..start]);
         let Some(end) = rest[start..].find('}').map(|i| start + i) else {
+            // No closing brace: push the unterminated remainder exactly
+            // once, then clear `rest` so the trailing `push_str` below
+            // does not re-push the prefix already written this iteration.
+            out.push_str(&rest[start..]);
+            rest = "";
             break;
         };
         let key = &rest[start + 1..end];
@@ -290,5 +298,25 @@ mod tests {
         assert_eq!(parse_color("ff8800"), Some(Rgb(255, 136, 0)));
         assert_eq!(parse_color("#fff"), None);
         assert_eq!(parse_color("nope"), None);
+    }
+
+    #[test]
+    fn parse_color_rejects_a_six_byte_multi_byte_string() {
+        // "1ä234" is 6 BYTES but not 6 ASCII hex digits; slicing at fixed
+        // byte offsets must not panic on the split multi-byte char.
+        assert_eq!(parse_color("1ä234"), None);
+    }
+
+    #[test]
+    fn unterminated_brace_does_not_duplicate_text() {
+        assert_eq!(expand("X{Y", &snap(0.0, 0.0), NOW), "X{Y");
+    }
+
+    #[test]
+    fn placeholder_then_unterminated_brace_does_not_duplicate_text() {
+        assert_eq!(
+            expand("{weekly}% {nope", &snap(0.0, 80.0), NOW),
+            "80% {nope"
+        );
     }
 }
