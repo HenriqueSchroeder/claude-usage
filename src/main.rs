@@ -1,4 +1,5 @@
-use ksni::{Tray, TrayService};
+use ksni::blocking::TrayMethods;
+use ksni::Tray;
 
 struct Probe;
 
@@ -17,5 +18,10 @@ impl Tray for Probe {
 }
 
 fn main() {
-    TrayService::new(Probe).run().ok();
+    match Probe.spawn() {
+        Ok(_handle) => loop {
+            std::thread::park();
+        },
+        Err(err) => eprintln!("failed to start tray service: {err}"),
+    }
 }
