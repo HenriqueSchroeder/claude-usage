@@ -2,6 +2,7 @@ use ksni::blocking::TrayMethods;
 use ksni::Tray;
 
 mod creds;
+mod quota;
 
 struct Probe;
 
