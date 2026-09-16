@@ -7,6 +7,7 @@ mod events;
 mod notify;
 mod pricing;
 mod quota;
+mod render;
 mod session;
 mod state;
 
