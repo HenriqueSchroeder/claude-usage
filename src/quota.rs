@@ -90,23 +90,25 @@ fn parse_ts(s: &Option<String>) -> Option<OffsetDateTime> {
     OffsetDateTime::parse(s, &time::format_description::well_known::Rfc3339).ok()
 }
 
-fn window_from_limit(l: &RawLimit) -> Window {
-    Window {
-        percent: l.percent.unwrap_or(0.0),
+/// `None` when the entry carries no percentage. The object being present is
+/// not a reading — a `limits[]` entry whose `percent` was renamed is exactly
+/// as uninformative as a missing entry, and must not become 0%.
+fn window_from_limit(l: &RawLimit) -> Option<Window> {
+    Some(Window {
+        percent: l.percent?,
         resets_at: parse_ts(&l.resets_at),
         severity: l.severity.as_deref().unwrap_or("normal").into(),
-    }
+    })
 }
 
-fn window_from_raw(w: &Option<RawWindow>) -> Window {
-    match w {
-        Some(w) => Window {
-            percent: w.utilization.unwrap_or(0.0),
-            resets_at: parse_ts(&w.resets_at),
-            severity: Severity::Normal,
-        },
-        None => Window::default(),
-    }
+/// `None` when the window carries no utilization, for the same reason.
+fn window_from_raw(w: &Option<RawWindow>) -> Option<Window> {
+    let w = w.as_ref()?;
+    Some(Window {
+        percent: w.utilization?,
+        resets_at: parse_ts(&w.resets_at),
+        severity: Severity::Normal,
+    })
 }
 
 pub const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
@@ -155,35 +157,38 @@ pub fn fetch(agent: &ureq::Agent, token: &str) -> Result<Quota, FetchError> {
 /// null, so each individual field stays optional: a response carrying only
 /// one of the two windows still parses, and unknown keys are ignored.
 ///
-/// A response carrying *none* of the windows this module reads is a
-/// different thing entirely — not a reading of zero, but a shape we no
-/// longer understand. That fails, so the caller keeps the last good reading
-/// and backs off instead of painting a confident green 0%.
+/// A response in which *no* window carries a usable number is a different
+/// thing entirely — not a reading of zero, but a shape we no longer
+/// understand. That fails, so the caller keeps the last good reading and
+/// backs off instead of painting a confident green 0%.
+///
+/// The test is the number, not the object around it. A retained `five_hour`
+/// whose `utilization` was renamed is exactly as uninformative as a missing
+/// `five_hour`, and a payload reshuffle is at least as likely as a dropped
+/// key.
 pub fn parse_usage(bytes: &[u8]) -> Result<Quota, String> {
     let raw: RawUsage = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
 
-    let mut recognised = raw.five_hour.is_some() || raw.seven_day.is_some();
     let mut session = window_from_raw(&raw.five_hour);
     let mut weekly = window_from_raw(&raw.seven_day);
 
-    // limits[] is the normalized form and carries server-decided severity,
-    // so it wins over the top-level windows when present.
+    // limits[] is the normalized form and carries server-decided severity, so
+    // it wins over the top-level windows — but only when it actually brought a
+    // number. `or` keeps whatever the top level already gave us otherwise.
     for l in raw.limits.iter().flatten() {
         match l.kind.as_deref() {
-            Some("session") => {
-                session = window_from_limit(l);
-                recognised = true;
-            }
-            Some("weekly_all") => {
-                weekly = window_from_limit(l);
-                recognised = true;
-            }
+            Some("session") => session = window_from_limit(l).or(session),
+            Some("weekly_all") => weekly = window_from_limit(l).or(weekly),
             _ => {}
         }
     }
 
-    if !recognised {
-        return Err("no five_hour, seven_day or limits[] window in the response".into());
+    if session.is_none() && weekly.is_none() {
+        return Err(
+            "no window in the response carried a usage value (five_hour/seven_day \
+             utilization, or limits[].percent)"
+                .into(),
+        );
     }
 
     let breakdown = raw
@@ -199,9 +204,12 @@ pub fn parse_usage(bytes: &[u8]) -> Result<Quota, String> {
         })
         .collect();
 
+    // At least one window is real; the other defaults to 0% as before. That
+    // is the tolerance this module is meant to have — half a known response
+    // is still a reading.
     Ok(Quota {
-        session,
-        weekly,
+        session: session.unwrap_or_default(),
+        weekly: weekly.unwrap_or_default(),
         breakdown,
     })
 }
@@ -276,7 +284,8 @@ mod tests {
     #[test]
     fn one_recognised_window_is_enough_to_parse() {
         // Tolerance is still this module's job: half a known response is a
-        // reading, not a failure. The absent half stays at its default.
+        // reading, not a failure. "Partially recognised" means one of the two
+        // windows carried a number — not a window carrying nothing.
         let q = parse_usage(br#"{"five_hour":{"utilization":42.0}}"#).unwrap();
         assert_eq!(q.session.percent, 42.0);
         assert_eq!(q.weekly.percent, 0.0);
@@ -286,9 +295,32 @@ mod tests {
     }
 
     #[test]
-    fn a_present_but_empty_window_still_counts_as_recognised() {
-        // The shape is the known one; only the number is missing.
-        assert!(parse_usage(br#"{"five_hour":{}}"#).is_ok());
+    fn a_window_whose_value_field_was_renamed_is_not_a_reading_of_zero() {
+        // The likeliest shape change of all: the objects stay, the field
+        // inside them is renamed. Reading that as 0% would be the original
+        // bug verbatim — green zeros, last good value destroyed, armed
+        // thresholds cleared.
+        let json = br#"{"five_hour":{"used_pct":24.0},"seven_day":{"used_pct":96.0}}"#;
+        assert!(parse_usage(json).is_err());
+    }
+
+    #[test]
+    fn a_window_object_carrying_no_number_is_not_a_reading() {
+        // Present but empty, explicitly null, and a limits[] entry of a known
+        // kind with no percent: none of these is a reading.
+        assert!(parse_usage(br#"{"five_hour":{}}"#).is_err());
+        assert!(parse_usage(br#"{"five_hour":{"utilization":null}}"#).is_err());
+        assert!(parse_usage(br#"{"limits":[{"kind":"session"}]}"#).is_err());
+    }
+
+    #[test]
+    fn a_valueless_limits_entry_does_not_erase_the_top_level_window() {
+        // limits[] wins only when it brought a number. Otherwise the
+        // top-level reading stands rather than being overwritten with 0%.
+        let json = br#"{"five_hour":{"utilization":37.0},
+                        "limits":[{"kind":"session","severity":"critical"}]}"#;
+        let q = parse_usage(json).unwrap();
+        assert_eq!(q.session.percent, 37.0);
     }
 
     #[test]
