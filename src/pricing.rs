@@ -1,7 +1,3 @@
-// Task 7 will wire this module into main.rs; until then nothing outside
-// the tests calls it, so allow the dead-code lint the same way quota.rs does.
-#![allow(dead_code)]
-
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Tokens {
     pub input: u64,

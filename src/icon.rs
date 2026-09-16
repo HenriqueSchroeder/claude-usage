@@ -1,7 +1,3 @@
-// Task 14 will wire this module into main.rs; until then nothing outside
-// the tests calls it, so allow the dead-code lint the same way state.rs does.
-#![allow(dead_code)]
-
 use crate::render::Rgb;
 
 const SS: u32 = 4; // supersampling factor, for anti-aliasing without a rasterizer
@@ -69,24 +65,6 @@ pub fn ring(percent: f32, color: Rgb, size: u32) -> Vec<u8> {
     out
 }
 
-/// Frames for a pulse, fading the whole icon in and out once.
-///
-/// Callers drive these on a timer that exists only while the effect plays;
-/// nothing animates at rest.
-pub fn pulse_frames(percent: f32, color: Rgb, size: u32, count: usize) -> Vec<Vec<u8>> {
-    (0..count)
-        .map(|i| {
-            let phase = (i as f32 / count.max(1) as f32) * std::f32::consts::TAU;
-            let scale = 0.45 + 0.55 * (1.0 - phase.cos()) / 2.0;
-            let mut frame = ring(percent, color, size);
-            for px in frame.chunks_mut(4) {
-                px[0] = (px[0] as f32 * scale) as u8;
-            }
-            frame
-        })
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -125,12 +103,5 @@ mod tests {
     #[test]
     fn zero_size_yields_empty_not_panic() {
         assert!(ring(50.0, RED, 0).is_empty());
-    }
-
-    #[test]
-    fn pulse_yields_the_requested_frame_count_and_they_vary() {
-        let frames = pulse_frames(50.0, RED, 22, 12);
-        assert_eq!(frames.len(), 12);
-        assert!(frames.iter().any(|f| *f != frames[0]));
     }
 }

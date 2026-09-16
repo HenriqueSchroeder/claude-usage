@@ -1,8 +1,3 @@
-// Task 14 will wire this module into main.rs; until then nothing outside
-// the tests calls it, so allow the dead-code lint the same way creds.rs,
-// quota.rs and pricing.rs do.
-#![allow(dead_code)]
-
 use crate::pricing::Tokens;
 use serde::Deserialize;
 use std::io::{BufRead, BufReader, Seek, SeekFrom};

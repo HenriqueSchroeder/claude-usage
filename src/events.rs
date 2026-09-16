@@ -1,7 +1,3 @@
-// Task 14 will wire this module into main.rs; until then nothing outside
-// the tests calls it, so allow the dead-code lint the same way state.rs does.
-#![allow(dead_code)]
-
 use crate::config::ThresholdConfig;
 use crate::state::{Health, Snapshot};
 use serde::{Deserialize, Serialize};
@@ -50,11 +46,14 @@ impl Detector {
     }
 
     pub fn load(path: &Path, cfg: ThresholdConfig) -> Self {
-        let state = std::fs::read(path)
+        let mut detector = Detector::new(cfg);
+        if let Some(state) = std::fs::read(path)
             .ok()
             .and_then(|b| serde_json::from_slice(&b).ok())
-            .unwrap_or_default();
-        Detector { cfg, state }
+        {
+            detector.state = state;
+        }
+        detector
     }
 
     pub fn save(&self, path: &Path) {

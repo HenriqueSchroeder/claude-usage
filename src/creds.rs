@@ -2,7 +2,6 @@ use serde::Deserialize;
 use std::path::Path;
 
 #[derive(Debug)]
-#[allow(dead_code)]
 pub enum CredsError {
     Missing,
     Unreadable(String),
@@ -10,14 +9,12 @@ pub enum CredsError {
 }
 
 #[derive(Deserialize)]
-#[allow(dead_code)]
 struct CredsFile {
     #[serde(default, rename = "claudeAiOauth")]
     claude_ai_oauth: Option<OauthSection>,
 }
 
 #[derive(Deserialize)]
-#[allow(dead_code)]
 struct OauthSection {
     #[serde(default, rename = "accessToken")]
     access_token: String,
@@ -27,7 +24,6 @@ struct OauthSection {
 ///
 /// This function never writes. Claude Code refreshes the token in place and
 /// a concurrent write from here would race it and can destroy the login.
-#[allow(dead_code)]
 pub fn read_access_token(path: &Path) -> Result<String, CredsError> {
     let raw = match std::fs::read(path) {
         Ok(r) => r,

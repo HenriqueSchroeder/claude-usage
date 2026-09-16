@@ -1,8 +1,3 @@
-// Task 14 will wire this module into main.rs; until then nothing outside
-// the tests calls it, so allow the dead-code lint the same way creds.rs,
-// quota.rs, pricing.rs and session.rs do.
-#![allow(dead_code)]
-
 use crate::quota::Quota;
 use crate::session::SessionInfo;
 use time::{Duration, OffsetDateTime};

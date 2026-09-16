@@ -1,7 +1,3 @@
-// Task 5/8 will wire this module into main.rs; until then nothing outside
-// the tests calls it, so allow the dead-code lint the same way creds.rs does.
-#![allow(dead_code)]
-
 use serde::Deserialize;
 use time::OffsetDateTime;
 

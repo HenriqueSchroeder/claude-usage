@@ -1,7 +1,3 @@
-// Task 14 will wire this module into main.rs; until then nothing outside
-// the tests calls it, so allow the dead-code lint the same way state.rs does.
-#![allow(dead_code)]
-
 use serde::Deserialize;
 use std::path::Path;
 
