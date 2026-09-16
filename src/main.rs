@@ -1,6 +1,7 @@
 use ksni::blocking::TrayMethods;
 use ksni::Tray;
 
+mod config;
 mod creds;
 mod pricing;
 mod quota;
