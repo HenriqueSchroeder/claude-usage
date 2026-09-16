@@ -96,7 +96,7 @@ nested under an `[events]` table):
 | Key | Default | Notes |
 |---|---|---|
 | `poll_seconds` | `60` | Floored to 10 |
-| `[bar].format` | `"{session}% · {weekly}%"` | Placeholders: `{session}`, `{weekly}`, `{reset}`, `{cost}`, `{project}`, `{model}`, `{tokens}` |
+| `[bar].format` | `"{session}% · {weekly}%"` | Placeholders: `{session}`, `{weekly}`, `{session_reset}`, `{weekly_reset}`, `{reset}`, `{cost}`, `{project}`, `{model}`, `{tokens}` — see the note on `{reset}` below |
 | `[bar].rules` | `[]` | Array of `{metric, above, format?, color?, effect?}`; first match (top to bottom) wins |
 | `[bar].rules[].effect` | `"pulse"` (opt-in per rule) | **Works** — flips the tray status to `NeedsAttention`; see note below |
 | `[threshold].levels` | `[75, 90, 95]` | Percentages that trigger a notification |
@@ -106,8 +106,24 @@ nested under an `[events]` table):
 | `[reset].effect` | `"pulse"` | **Inert** — not the same key as `[bar].rules[].effect` above; see [Not yet implemented](#not-yet-implemented) |
 | `[reset].duration` | `2` | **Inert** — same |
 
-There are two unrelated `effect` keys in this config, and only one of them
-does anything:
+### `{reset}` means the nearest window, not the weekly one
+
+`{reset}` renders the time until **whichever of the two windows clears
+first**. The 5-hour window is the nearer one almost always, so a template
+like `"⚠ {weekly}% · reset {reset}"` will show `⚠ 96% · reset 2h10` while
+the weekly window is actually four days out — the words say weekly, the
+number is the session.
+
+Use `{session_reset}` and `{weekly_reset}` when you mean a specific window;
+they never stand in for the other one, and render `—` when the endpoint did
+not say. `{reset}` is kept as-is for templates already written against it.
+Both windows' reset times are shown in the menu, so whatever the panel says
+can be checked against the source.
+
+### Two unrelated `effect` keys
+
+There are two `effect` keys in this config, and only one of them does
+anything:
 
 - `[bar].rules[].effect = "pulse"` **works today**. A matching rule sets the
   StatusNotifierItem's status to `NeedsAttention` instead of `Active` (see

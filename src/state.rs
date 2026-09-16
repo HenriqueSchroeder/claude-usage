@@ -36,16 +36,32 @@ impl Snapshot {
         self.quota.as_ref().map_or(0.0, |q| q.weekly.percent)
     }
 
-    /// Time until the nearest upcoming window reset, if any.
+    /// Time until the 5-hour window clears, if the endpoint said when.
+    pub fn session_reset_in(&self, now: OffsetDateTime) -> Option<Duration> {
+        until(self.quota.as_ref()?.session.resets_at, now)
+    }
+
+    /// Time until the 7-day window clears, if the endpoint said when.
+    pub fn weekly_reset_in(&self, now: OffsetDateTime) -> Option<Duration> {
+        until(self.quota.as_ref()?.weekly.resets_at, now)
+    }
+
+    /// Time until the *nearest* upcoming window reset, whichever that is.
+    ///
+    /// In practice that is nearly always the 5-hour one, which is why
+    /// `{session_reset}` and `{weekly_reset}` exist: a template that says
+    /// "weekly" beside this number is saying something false.
     pub fn reset_in(&self, now: OffsetDateTime) -> Option<Duration> {
-        let q = self.quota.as_ref()?;
-        [q.session.resets_at, q.weekly.resets_at]
+        [self.session_reset_in(now), self.weekly_reset_in(now)]
             .into_iter()
             .flatten()
-            .map(|t| t - now)
-            .filter(|d| d.is_positive())
             .min()
     }
+}
+
+fn until(at: Option<OffsetDateTime>, now: OffsetDateTime) -> Option<Duration> {
+    let remaining = at? - now;
+    remaining.is_positive().then_some(remaining)
 }
 
 #[cfg(test)]
@@ -72,6 +88,36 @@ mod tests {
         };
         let d = s.reset_in(datetime!(2026-09-15 14:40 UTC)).unwrap();
         assert_eq!(d.whole_minutes(), 60);
+    }
+
+    #[test]
+    fn each_window_reports_its_own_reset() {
+        let mut q = crate::quota::Quota::default();
+        q.session.resets_at = Some(datetime!(2026-09-15 15:40 UTC));
+        q.weekly.resets_at = Some(datetime!(2026-09-19 07:00 UTC));
+        let s = Snapshot {
+            quota: Some(q),
+            ..Default::default()
+        };
+        let now = datetime!(2026-09-15 14:40 UTC);
+
+        // The nearest is the 5-hour one, as it almost always is...
+        assert_eq!(s.reset_in(now).unwrap().whole_minutes(), 60);
+        assert_eq!(s.session_reset_in(now).unwrap().whole_minutes(), 60);
+        // ...but the weekly window is nearly four days out, and a template
+        // saying "weekly" must be able to say so truthfully.
+        assert_eq!(s.weekly_reset_in(now).unwrap().whole_hours(), 88);
+    }
+
+    #[test]
+    fn a_window_with_no_reset_time_reports_none_not_the_other_window() {
+        let mut q = crate::quota::Quota::default();
+        q.session.resets_at = Some(datetime!(2026-09-15 15:40 UTC));
+        let s = Snapshot {
+            quota: Some(q),
+            ..Default::default()
+        };
+        assert!(s.weekly_reset_in(datetime!(2026-09-15 14:40 UTC)).is_none());
     }
 
     #[test]

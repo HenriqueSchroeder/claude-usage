@@ -60,10 +60,7 @@ pub fn human_duration(d: time::Duration) -> String {
 }
 
 fn expand(template: &str, snap: &Snapshot, now: OffsetDateTime) -> String {
-    let reset = snap
-        .reset_in(now)
-        .map(human_duration)
-        .unwrap_or_else(|| NO_VALUE.into());
+    let until = |d: Option<time::Duration>| d.map_or_else(|| NO_VALUE.into(), human_duration);
     let session = snap.session.as_ref();
 
     let mut out = String::with_capacity(template.len());
@@ -82,7 +79,12 @@ fn expand(template: &str, snap: &Snapshot, now: OffsetDateTime) -> String {
         let value = match key {
             "session" => Some(format!("{:.0}", snap.session_pct())),
             "weekly" => Some(format!("{:.0}", snap.weekly_pct())),
-            "reset" => Some(reset.clone()),
+            // {reset} is the nearest of the two windows, which is almost
+            // always the 5-hour one. The two named placeholders exist so a
+            // template can say which window it means.
+            "reset" => Some(until(snap.reset_in(now))),
+            "session_reset" => Some(until(snap.session_reset_in(now))),
+            "weekly_reset" => Some(until(snap.weekly_reset_in(now))),
             "cost" => Some(match snap.cost_usd {
                 Some(c) => format!("{c:.2}"),
                 None => NO_VALUE.into(),
@@ -198,6 +200,45 @@ mod tests {
             rules: vec![],
         };
         assert_eq!(render(&cfg, &snap(24.0, 98.0), NOW).text, "1h00");
+    }
+
+    #[test]
+    fn each_reset_placeholder_names_its_own_window() {
+        let mut s = snap(24.0, 96.0);
+        // 5-hour window clears in an hour, weekly in four days.
+        s.quota.as_mut().unwrap().weekly.resets_at = Some(datetime!(2026-09-19 14:40 UTC));
+
+        let text = |fmt: &str| {
+            render(
+                &BarConfig {
+                    format: fmt.into(),
+                    rules: vec![],
+                },
+                &s,
+                NOW,
+            )
+            .text
+        };
+
+        // The spec's own example rule used to claim the weekly window was
+        // an hour out because {reset} silently meant the nearer one.
+        assert_eq!(
+            text("⚠ {weekly}% · reset {weekly_reset}"),
+            "⚠ 96% · reset 96h00"
+        );
+        assert_eq!(text("{session_reset}"), "1h00");
+        // {reset} keeps meaning "the nearest of the two".
+        assert_eq!(text("{reset}"), "1h00");
+    }
+
+    #[test]
+    fn a_window_with_no_reset_time_renders_a_dash() {
+        let cfg = BarConfig {
+            format: "{weekly_reset}".into(),
+            rules: vec![],
+        };
+        // snap() sets only the session window's reset.
+        assert_eq!(render(&cfg, &snap(1.0, 1.0), NOW).text, "—");
     }
 
     #[test]

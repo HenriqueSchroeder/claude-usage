@@ -13,10 +13,24 @@ poll_seconds = 60
 [bar]
 # Template for the text drawn on the panel next to the icon (exported as the
 # XAyatanaLabel; plain StatusNotifierItem hosts that don't read that
-# property won't show it). Placeholders: {session}, {weekly}, {reset},
-# {cost}, {project}, {model}, {tokens}. An unknown placeholder, e.g. a typo,
-# is left literal in the output instead of vanishing, so mistakes are
-# visible.
+# property won't show it). An unknown placeholder, e.g. a typo, is left
+# literal in the output instead of vanishing, so mistakes are visible.
+#
+# Placeholders:
+#   {session}         5-hour window usage, whole percent
+#   {weekly}          7-day window usage, whole percent
+#   {session_reset}   time until the 5-hour window clears (e.g. "2h10")
+#   {weekly_reset}    time until the 7-day window clears
+#   {reset}           WHICHEVER OF THE TWO IS NEARER — not the weekly one.
+#                     The 5-hour window is nearer almost always, so a
+#                     template pairing "{weekly}%" with "reset {reset}" will
+#                     read as a claim about the weekly window while showing
+#                     the session one. Use {weekly_reset} when you mean the
+#                     weekly window. Both windows' reset times are also in
+#                     the menu, so any of these can be checked.
+#   {cost}            session cost estimate, or "—" if a model in the
+#                     session has no known price
+#   {project}, {model}, {tokens}   from the active session
 format = "{session}% · {weekly}%"
 
 # Optional rules that override the format and/or color when a metric crosses
@@ -39,7 +53,7 @@ format = "{session}% · {weekly}%"
 # [[bar.rules]]
 # metric = "weekly"
 # above = 95
-# format = "⚠ {weekly}%"
+# format = "⚠ {weekly}% · reset {weekly_reset}"
 # color = "#e01b24"
 
 [threshold]

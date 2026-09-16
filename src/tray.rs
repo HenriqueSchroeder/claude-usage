@@ -3,6 +3,7 @@ use crate::quota::Severity;
 use crate::render::{human_duration, BarOutput, Effect};
 use crate::state::{Health, Snapshot};
 use ksni::{menu::StandardItem, Icon, MenuItem, Status, Tray};
+use time::OffsetDateTime;
 
 /// The panel item.
 ///
@@ -24,6 +25,17 @@ fn info(label: String) -> MenuItem<Indicator> {
         ..Default::default()
     }
     .into()
+}
+
+/// When a window clears, shown beside its percentage.
+///
+/// This is what gives `{reset}` on the panel something to be checked
+/// against: the bar shows the nearest of the two windows, and only here can
+/// the user see which one that was. Relative, not a wall-clock time —
+/// `time` cannot read the local UTC offset from a multi-threaded process,
+/// and an hour-wrong "reset 12:40" would be worse than no clock at all.
+fn reset_note(remaining: Option<time::Duration>) -> String {
+    remaining.map_or_else(String::new, |d| format!("  reset em {}", human_duration(d)))
 }
 
 /// The endpoint's own verdict on a window, shown beside our percentage.
@@ -117,14 +129,19 @@ impl Tray for Indicator {
         match self.snap.quota.as_ref() {
             None => items.push(info("Sem dados de quota".into())),
             Some(q) => {
+                // Read at the moment the menu opens, not at the last poll:
+                // the countdown shown is the countdown as of now.
+                let now = OffsetDateTime::now_utc();
                 items.push(info(format!(
-                    "Sessão 5h      {:.0}%{}",
+                    "Sessão 5h      {:.0}%{}{}",
                     self.snap.session_pct(),
+                    reset_note(self.snap.session_reset_in(now)),
                     severity_note(q.session.severity)
                 )));
                 items.push(info(format!(
-                    "Semanal        {:.0}%{}",
+                    "Semanal        {:.0}%{}{}",
                     self.snap.weekly_pct(),
+                    reset_note(self.snap.weekly_reset_in(now)),
                     severity_note(q.weekly.severity)
                 )));
                 for row in &q.breakdown {
