@@ -13,6 +13,7 @@ ureq = { version = "2", features = ["json", "tls"] }
 notify = "6"
 toml = "0.8"
 time = { version = "0.3", features = ["parsing", "formatting", "macros"] }
+zbus = { version = "5", default-features = false, features = ["blocking-api"] }
 
 [profile.release]
 opt-level = "z"
