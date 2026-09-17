@@ -19,7 +19,7 @@ poll_seconds = 60
 # Placeholders:
 #   {session}         5-hour window usage, whole percent
 #   {weekly}          7-day window usage, whole percent
-#   {session_reset}   time until the 5-hour window clears (e.g. "2h10")
+#   {session_reset}   time until the 5-hour window clears (e.g. "2h10m")
 #   {weekly_reset}    time until the 7-day window clears
 #   {reset}           WHICHEVER OF THE TWO IS NEARER — not the weekly one.
 #                     The 5-hour window is nearer almost always, so a

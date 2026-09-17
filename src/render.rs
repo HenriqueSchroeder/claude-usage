@@ -50,25 +50,13 @@ fn metric_value(snap: &Snapshot, metric: &str) -> Option<f32> {
     }
 }
 
-pub fn human_duration(d: time::Duration) -> String {
-    let total = d.whole_minutes().max(0);
-    if total >= 60 {
-        format!("{}h{:02}", total / 60, total % 60)
-    } else {
-        format!("{total}m")
-    }
-}
-
-/// Compact, unit-suffixed duration for the tray menu's quota lines.
+/// Duration formatter shared by the bar's `{reset}`/`{session_reset}`/
+/// `{weekly_reset}` placeholders and the tray menu's quota lines.
 ///
 /// Drops precision as the magnitude grows: minutes alone under an hour,
 /// hours+minutes under a day, whole days+hours from a day up — at that
-/// scale minutes are noise. This differs from `human_duration` (no day
-/// rollover, no trailing `m`) because that one feeds the single-line bar
-/// text, where the terser, non-suffixed form is the established contract;
-/// changing it would change what every configured `{reset}` template
-/// prints today.
-pub fn compact_duration(d: time::Duration) -> String {
+/// scale minutes are noise.
+pub fn human_duration(d: time::Duration) -> String {
     let total = d.whole_minutes().max(0);
     let days = total / (24 * 60);
     if days > 0 {
@@ -243,7 +231,7 @@ mod tests {
             format: "{reset}".into(),
             rules: vec![],
         };
-        assert_eq!(render(&cfg, &snap(24.0, 98.0), NOW).text, "1h00");
+        assert_eq!(render(&cfg, &snap(24.0, 98.0), NOW).text, "1h00m");
     }
 
     #[test]
@@ -268,11 +256,11 @@ mod tests {
         // an hour out because {reset} silently meant the nearer one.
         assert_eq!(
             text("⚠ {weekly}% · reset {weekly_reset}"),
-            "⚠ 96% · reset 96h00"
+            "⚠ 96% · reset 4d00h"
         );
-        assert_eq!(text("{session_reset}"), "1h00");
+        assert_eq!(text("{session_reset}"), "1h00m");
         // {reset} keeps meaning "the nearest of the two".
-        assert_eq!(text("{reset}"), "1h00");
+        assert_eq!(text("{reset}"), "1h00m");
     }
 
     #[test]
@@ -414,11 +402,23 @@ mod tests {
     }
 
     #[test]
-    fn compact_duration_drops_precision_as_magnitude_grows() {
-        assert_eq!(compact_duration(time::Duration::minutes(51)), "51m");
-        assert_eq!(compact_duration(time::Duration::minutes(291)), "4h51m");
+    fn human_duration_drops_precision_as_magnitude_grows() {
+        assert_eq!(human_duration(time::Duration::minutes(51)), "51m");
+        assert_eq!(human_duration(time::Duration::minutes(291)), "4h51m");
         // A day or more rounds to hours; minutes are noise at that scale.
-        assert_eq!(compact_duration(time::Duration::minutes(8400)), "5d20h");
+        assert_eq!(human_duration(time::Duration::minutes(8400)), "5d20h");
+    }
+
+    #[test]
+    fn human_duration_boundary_transitions() {
+        // Sub-minute durations floor to zero, not a blank or negative value.
+        assert_eq!(human_duration(time::Duration::seconds(30)), "0m");
+        // Bare minutes give way to h+m the instant an hour is reached.
+        assert_eq!(human_duration(time::Duration::minutes(59)), "59m");
+        assert_eq!(human_duration(time::Duration::minutes(60)), "1h00m");
+        // h+m gives way to day+hour the instant a full day is reached.
+        assert_eq!(human_duration(time::Duration::minutes(1439)), "23h59m");
+        assert_eq!(human_duration(time::Duration::minutes(1440)), "1d00h");
     }
 
     #[test]

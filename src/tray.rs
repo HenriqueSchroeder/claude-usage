@@ -1,6 +1,6 @@
 use crate::icon::{pulse_frame, ring};
 use crate::quota::Severity;
-use crate::render::{compact_duration, human_duration, BarOutput, Effect, NO_VALUE};
+use crate::render::{human_duration, BarOutput, Effect, NO_VALUE};
 use crate::state::{Health, Snapshot};
 use ksni::{menu::StandardItem, Icon, MenuItem, OfflineReason, Status, Tray};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -67,7 +67,7 @@ fn quota_line(
     remaining: Option<time::Duration>,
     severity: Severity,
 ) -> String {
-    let time = remaining.map_or_else(|| NO_VALUE.into(), compact_duration);
+    let time = remaining.map_or_else(|| NO_VALUE.into(), human_duration);
     format!(
         "{label}  {percent:.0}%  ·  {time}{}",
         severity_note(severity)

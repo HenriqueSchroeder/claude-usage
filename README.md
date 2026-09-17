@@ -120,7 +120,7 @@ nested under an `[events]` table):
 
 `{reset}` renders the time until **whichever of the two windows clears
 first**. The 5-hour window is the nearer one almost always, so a template
-like `"⚠ {weekly}% · reset {reset}"` will show `⚠ 96% · reset 2h10` while
+like `"⚠ {weekly}% · reset {reset}"` will show `⚠ 96% · reset 2h10m` while
 the weekly window is actually four days out — the words say weekly, the
 number is the session.
 
