@@ -85,5 +85,12 @@ notify = true
 # one-frame flicker. `duration` is capped at 30 seconds regardless of what
 # is written here, so a very large value cannot leave the icon animating
 # indefinitely.
+#
+# The animation runs by borrowing from the sleep between polls, not by
+# adding a separate timer, so a long `duration` against a short
+# `poll_seconds` measurably slows down polling: at the 10-second floor with
+# `duration` at its 30-second cap, the next poll lands ~30 seconds after the
+# last one, three times the configured interval, not a rounding error.
+# Lower `duration` if a short `poll_seconds` matters more than a long pulse.
 effect = "pulse"
 duration = 2

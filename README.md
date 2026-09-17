@@ -172,12 +172,21 @@ to the tray (one `ksni::Handle::update` call per frame, `FRAME_INTERVAL_MS`
 apart) and sleeps the rest as before. That keeps the tray to a single writer
 — a second thread on its own timer would race the loop's normal per-cycle
 update, and whichever one landed last would decide whether the icon got
-stuck mid-pulse. The cost is that a pulse longer than the remaining sleep
-(only possible with a large `[reset].duration` against a short
-`poll_seconds`, especially its 10-second floor) delays the next poll by the
-difference; nothing crashes or hangs, the next reading is just a little
-late. When the animation ends, the override is cleared and the icon goes
-back to exactly the ring implied by the current reading — never a
+stuck mid-pulse.
+
+**A long animation extends the effective poll interval — it does not just
+round the edges off it.** A pulse longer than the remaining sleep delays the
+next poll by the difference; nothing crashes or hangs (the subtraction that
+computes the remaining sleep saturates at zero rather than going negative),
+but the delay can be substantial. Worst case: `poll_seconds` at its 10-second
+floor with `[reset].duration` at its 30-second cap animates for the full 30
+seconds and sleeps for 0, so the next poll lands roughly 30 seconds after
+the last one — three times the configured interval, not "a little late."
+Anyone running a short `poll_seconds` who also wants long reset animations
+should expect polling to slow down to roughly `duration` seconds whenever a
+window resets, and lower `duration` if that matters more than the pulse
+being long. When the animation ends, the override is cleared and the icon
+goes back to exactly the ring implied by the current reading — never a
 leftover frame.
 
 ## Roadmap
