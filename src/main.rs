@@ -61,6 +61,16 @@ struct Daemon {
     failures: u32,
 }
 
+/// The result of reconciling one fetch against the last known reading.
+///
+/// `carried_over` names the window (`"five_hour"` or `"seven_day"`) that
+/// this response didn't carry and had to be filled in from `last_quota`, or
+/// `None` when both windows in this response were fresh.
+struct Merged {
+    quota: quota::Quota,
+    carried_over: Option<&'static str>,
+}
+
 impl Daemon {
     fn read_quota(&mut self, snap: &mut Snapshot) {
         let token = match creds::read_access_token(&self.creds_path) {
@@ -77,15 +87,85 @@ impl Daemon {
         };
 
         match quota::fetch(&self.agent, &token) {
-            Ok(q) => {
-                snap.health = Health::Ok;
-                self.last_quota = Some(q);
-                self.last_ok = Some(Instant::now());
-                self.failures = 0;
-                self.notes.clear();
-            }
+            Ok(parsed) => match self.merge_quota(parsed) {
+                Some(merged) => {
+                    match merged.carried_over {
+                        None => {
+                            snap.health = Health::Ok;
+                            self.notes.clear();
+                            self.last_ok = Some(Instant::now());
+                        }
+                        Some(window) => {
+                            // Only part of this reading is fresh; saying
+                            // `Ok` here would be exactly the lie the
+                            // original bug told, just for one window
+                            // instead of both. `last_ok` is deliberately
+                            // left untouched: it now means "the last time
+                            // every window was fresh," so the age shown
+                            // keeps growing across consecutive partial
+                            // polls instead of resetting to near-zero.
+                            snap.health = Health::Stale {
+                                seconds: self.last_ok.map_or(0, |t| t.elapsed().as_secs()),
+                            };
+                            self.notes.say(format!(
+                                "usage response missing the {window} window; \
+                                 keeping the last reading for it"
+                            ));
+                        }
+                    }
+                    self.last_quota = Some(merged.quota);
+                    self.failures = 0;
+                }
+                None => self.note_failure(
+                    snap,
+                    quota::FetchError::Parse(
+                        "a window is missing from the response and there is no prior \
+                         reading to fall back on"
+                            .into(),
+                    ),
+                ),
+            },
             Err(e) => self.note_failure(snap, e),
         }
+    }
+
+    /// Fills in whichever window this response didn't carry, from the last
+    /// good reading — the per-window twin of how a fully failed poll
+    /// already leaves `last_quota` untouched rather than zero it.
+    /// `parse_usage` only ever returns `Ok` when at least one of the two
+    /// windows is `Some`, so at most one side ever needs a fallback here.
+    ///
+    /// `None` means a window is missing and there is nothing yet to fall
+    /// back on — most likely the very first successful poll dropping a
+    /// window — so the caller treats the whole poll like a failed one
+    /// rather than show a metric that has never actually been read.
+    fn merge_quota(&self, parsed: quota::ParsedUsage) -> Option<Merged> {
+        let prior = self.last_quota.as_ref();
+        let mut carried_over = None;
+
+        let session = match parsed.session {
+            Some(w) => w,
+            None => {
+                carried_over = Some("five_hour");
+                prior?.session.clone()
+            }
+        };
+        let weekly = match parsed.weekly {
+            Some(w) => w,
+            None => {
+                carried_over = Some("seven_day");
+                prior?.weekly.clone()
+            }
+        };
+
+        Some(Merged {
+            quota: quota::Quota {
+                session,
+                weekly,
+                breakdown: parsed.breakdown,
+            },
+            carried_over,
+        })
     }
 
     /// Records a failed poll. Counting happens here, once, for every variant:
@@ -455,6 +535,140 @@ mod tests {
         let (snap, bar, _events) = offline_daemon(&dir, None).cycle(NOW);
         assert!(snap.quota.is_none());
         assert_eq!(bar.text, "⚠ sem credencial");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    fn quota_with(session: f32, weekly: f32) -> quota::Quota {
+        let mut q = quota::Quota::default();
+        q.session.percent = session;
+        q.weekly.percent = weekly;
+        q
+    }
+
+    #[test]
+    fn merge_quota_fills_a_missing_window_from_the_last_reading() {
+        let dir = scratch("merge-fill");
+        let d = offline_daemon(&dir, Some(quota_with(92.0, 10.0)));
+
+        let merged = d
+            .merge_quota(quota::ParsedUsage {
+                session: None,
+                weekly: Some(quota::Window {
+                    percent: 55.0,
+                    ..Default::default()
+                }),
+                breakdown: vec![],
+            })
+            .expect("a prior reading exists to merge from");
+
+        // The dropped window is carried forward, not zeroed...
+        assert_eq!(merged.quota.session.percent, 92.0);
+        // ...and the fresh one is used as-is.
+        assert_eq!(merged.quota.weekly.percent, 55.0);
+        assert_eq!(merged.carried_over, Some("five_hour"));
+
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn merge_quota_does_not_mistake_a_genuine_zero_for_a_missing_window() {
+        let dir = scratch("merge-zero");
+        let d = offline_daemon(&dir, Some(quota_with(92.0, 10.0)));
+
+        let merged = d
+            .merge_quota(quota::ParsedUsage {
+                session: Some(quota::Window::default()), // a real 0%
+                weekly: Some(quota::Window {
+                    percent: 11.0,
+                    ..Default::default()
+                }),
+                breakdown: vec![],
+            })
+            .unwrap();
+
+        // Present-and-zero must overwrite the old 92.0, not be confused
+        // with absent-and-carried-forward.
+        assert_eq!(merged.quota.session.percent, 0.0);
+        assert_eq!(merged.carried_over, None);
+
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn merge_quota_gives_up_when_a_window_is_missing_with_nothing_to_fall_back_on() {
+        let dir = scratch("merge-nofallback");
+        let d = offline_daemon(&dir, None);
+
+        let merged = d.merge_quota(quota::ParsedUsage {
+            session: None,
+            weekly: Some(quota::Window {
+                percent: 11.0,
+                ..Default::default()
+            }),
+            breakdown: vec![],
+        });
+
+        assert!(
+            merged.is_none(),
+            "the very first poll has nothing to carry a missing window forward from"
+        );
+
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn an_absent_window_does_not_dearm_a_previously_crossed_threshold() {
+        // The exact production symptom: five_hour drops out of one
+        // response, the fabricated 0% used to dearm level 90, and the next
+        // real reading at 92% then looked like a brand new crossing —
+        // notification spam for a threshold that was never actually
+        // re-crossed.
+        let dir = scratch("partial-no-dearm");
+        let mut d = offline_daemon(&dir, None);
+        d.detector = events::Detector::new(config::ThresholdConfig {
+            levels: vec![90],
+            hysteresis: 2.0,
+            notify: true,
+        });
+
+        let snap_for = |q: quota::Quota| Snapshot {
+            quota: Some(q),
+            ..Default::default()
+        };
+
+        // First poll: session crosses 90. The first cycle never emits
+        // events by design, but the level is armed internally.
+        d.detector.diff(&snap_for(quota_with(92.0, 10.0)));
+        d.last_quota = Some(quota_with(92.0, 10.0));
+
+        // Second poll: five_hour is missing from the response. Merging
+        // must carry the 92.0 forward instead of feeding a fabricated 0.0
+        // into the detector, which would otherwise dearm level 90 here.
+        let merged = d
+            .merge_quota(quota::ParsedUsage {
+                session: None,
+                weekly: Some(quota::Window {
+                    percent: 11.0,
+                    ..Default::default()
+                }),
+                breakdown: vec![],
+            })
+            .expect("a prior reading exists to merge from");
+        assert_eq!(
+            merged.quota.session.percent, 92.0,
+            "carried forward, not zeroed"
+        );
+        d.detector.diff(&snap_for(merged.quota));
+
+        // Third poll: five_hour comes back at the same 92%. If the absent
+        // window had wrongly dearmed level 90, this would refire
+        // ThresholdCrossed even though nothing actually re-crossed it.
+        let evs = d.detector.diff(&snap_for(quota_with(92.0, 12.0)));
+        assert!(
+            evs.is_empty(),
+            "an absent window must not cause a false re-crossing: {evs:?}"
+        );
+
         std::fs::remove_dir_all(dir).ok();
     }
 

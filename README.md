@@ -44,6 +44,13 @@ last good value, labels it with its age, and backs off. A green `0% · 0%`
 would be the one wrong thing to show if Anthropic renames those fields
 while your weekly quota is nearly spent.
 
+The same rule applies one level down: if the response carries one window
+but drops the other, the missing one is filled in from the last good
+reading for that window (not zeroed), and the panel marks the whole
+reading as stale until a response with both windows arrives. On the very
+first successful poll there is nothing yet to fall back on, so a response
+missing a window there is treated the same as a failed poll.
+
 ## Credentials: read-only, always
 
 `claude-usage` reads the OAuth access token from

@@ -39,6 +39,20 @@ pub struct Quota {
     pub breakdown: Vec<BreakdownRow>,
 }
 
+/// What a single fetch produced, before the caller reconciles it against
+/// the last known reading.
+///
+/// `None` means this response carried no number for that window — the same
+/// distinction `parse_usage` needs internally to decide whether the
+/// response is recognised at all — and is not the same thing as
+/// `Some(Window { percent: 0.0, .. })`, a genuine zero reading.
+#[derive(Debug, Default)]
+pub struct ParsedUsage {
+    pub session: Option<Window>,
+    pub weekly: Option<Window>,
+    pub breakdown: Vec<BreakdownRow>,
+}
+
 #[derive(Deserialize, Default)]
 struct RawWindow {
     #[serde(default)]
@@ -130,7 +144,7 @@ fn map_status(code: u16, body: String) -> FetchError {
 }
 
 /// Fetches and parses the quota endpoint response over HTTP.
-pub fn fetch(agent: &ureq::Agent, token: &str) -> Result<Quota, FetchError> {
+pub fn fetch(agent: &ureq::Agent, token: &str) -> Result<ParsedUsage, FetchError> {
     let resp = agent
         .get(USAGE_URL)
         .set("Authorization", &format!("Bearer {token}"))
@@ -166,7 +180,13 @@ pub fn fetch(agent: &ureq::Agent, token: &str) -> Result<Quota, FetchError> {
 /// whose `utilization` was renamed is exactly as uninformative as a missing
 /// `five_hour`, and a payload reshuffle is at least as likely as a dropped
 /// key.
-pub fn parse_usage(bytes: &[u8]) -> Result<Quota, String> {
+///
+/// A window this response simply didn't carry comes back as `None`, not a
+/// default `Window`. This function has no memory of the last reading, so it
+/// cannot decide whether a missing window should fall back to something
+/// carried forward or be treated as never-read — that decision, and the
+/// data needed to make it, belongs to the caller.
+pub fn parse_usage(bytes: &[u8]) -> Result<ParsedUsage, String> {
     let raw: RawUsage = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
 
     let mut session = window_from_raw(&raw.five_hour);
@@ -204,12 +224,13 @@ pub fn parse_usage(bytes: &[u8]) -> Result<Quota, String> {
         })
         .collect();
 
-    // At least one window is real; the other defaults to 0% as before. That
-    // is the tolerance this module is meant to have — half a known response
-    // is still a reading.
-    Ok(Quota {
-        session: session.unwrap_or_default(),
-        weekly: weekly.unwrap_or_default(),
+    // At least one window is real; the other stays `None` rather than a
+    // fabricated 0%. That is the tolerance this module is meant to have —
+    // half a known response is still a reading, but the missing half must
+    // say so.
+    Ok(ParsedUsage {
+        session,
+        weekly,
         breakdown,
     })
 }
@@ -223,8 +244,10 @@ mod tests {
     #[test]
     fn parses_the_real_response() {
         let q = parse_usage(FIXTURE).unwrap();
-        assert!(q.session.percent >= 0.0 && q.session.percent <= 100.0);
-        assert!(q.weekly.percent >= 0.0 && q.weekly.percent <= 100.0);
+        let session = q.session.unwrap().percent;
+        let weekly = q.weekly.unwrap().percent;
+        assert!((0.0..=100.0).contains(&session));
+        assert!((0.0..=100.0).contains(&weekly));
     }
 
     #[test]
@@ -238,24 +261,25 @@ mod tests {
             ]
         }"#;
         let q = parse_usage(json).unwrap();
-        assert_eq!(q.session.percent, 33.0);
-        assert_eq!(q.weekly.percent, 77.0);
-        assert!(matches!(q.weekly.severity, Severity::Critical));
+        assert_eq!(q.session.unwrap().percent, 33.0);
+        let weekly = q.weekly.unwrap();
+        assert_eq!(weekly.percent, 77.0);
+        assert!(matches!(weekly.severity, Severity::Critical));
     }
 
     #[test]
     fn falls_back_to_top_level_windows_when_limits_absent() {
         let json = br#"{"five_hour":{"utilization":24.0},"seven_day":{"utilization":98.0}}"#;
         let q = parse_usage(json).unwrap();
-        assert_eq!(q.session.percent, 24.0);
-        assert_eq!(q.weekly.percent, 98.0);
+        assert_eq!(q.session.unwrap().percent, 24.0);
+        assert_eq!(q.weekly.unwrap().percent, 98.0);
     }
 
     #[test]
     fn unknown_keys_are_ignored() {
         let json = br#"{"five_hour":{"utilization":5.0},"nimbus_quill":{"utilization":0.0},
                         "a_key_invented_tomorrow":{"nested":[1,2,3]}}"#;
-        assert_eq!(parse_usage(json).unwrap().session.percent, 5.0);
+        assert_eq!(parse_usage(json).unwrap().session.unwrap().percent, 5.0);
     }
 
     #[test]
@@ -282,16 +306,30 @@ mod tests {
     }
 
     #[test]
-    fn one_recognised_window_is_enough_to_parse() {
+    fn a_missing_window_is_none_not_a_reading_of_zero() {
         // Tolerance is still this module's job: half a known response is a
-        // reading, not a failure. "Partially recognised" means one of the two
-        // windows carried a number — not a window carrying nothing.
+        // reading, not a failure. But the missing half must surface as
+        // `None` so the caller can tell "never sent" apart from "sent as
+        // 0" — filling it with a default here would be the original bug
+        // verbatim, just moved from the caller into this function.
         let q = parse_usage(br#"{"five_hour":{"utilization":42.0}}"#).unwrap();
-        assert_eq!(q.session.percent, 42.0);
-        assert_eq!(q.weekly.percent, 0.0);
+        assert_eq!(q.session.unwrap().percent, 42.0);
+        assert!(q.weekly.is_none(), "seven_day was never in the response");
 
         let q = parse_usage(br#"{"limits":[{"kind":"weekly_all","percent":8}]}"#).unwrap();
-        assert_eq!(q.weekly.percent, 8.0);
+        assert_eq!(q.weekly.unwrap().percent, 8.0);
+        assert!(q.session.is_none());
+    }
+
+    #[test]
+    fn a_genuine_zero_window_is_still_reported_as_zero() {
+        // The over-correction this must not make: a window that IS in the
+        // response, carrying an honest 0, is `Some(Window{percent: 0.0})` —
+        // not treated as absent just because the number is falsy.
+        let json = br#"{"five_hour":{"utilization":0.0},"seven_day":{"utilization":50.0}}"#;
+        let q = parse_usage(json).unwrap();
+        assert_eq!(q.session.unwrap().percent, 0.0);
+        assert_eq!(q.weekly.unwrap().percent, 50.0);
     }
 
     #[test]
@@ -320,7 +358,7 @@ mod tests {
         let json = br#"{"five_hour":{"utilization":37.0},
                         "limits":[{"kind":"session","severity":"critical"}]}"#;
         let q = parse_usage(json).unwrap();
-        assert_eq!(q.session.percent, 37.0);
+        assert_eq!(q.session.unwrap().percent, 37.0);
     }
 
     #[test]
