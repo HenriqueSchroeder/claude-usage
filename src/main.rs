@@ -254,6 +254,20 @@ impl Daemon {
     }
 }
 
+/// What `animate` needs from a tray handle: push a mutation, report whether
+/// anything was still there to receive it. `ksni::blocking::Handle` is the
+/// only real implementation; tests substitute a same-process fake so the
+/// frame sequence can be checked without a D-Bus connection or a display.
+trait FramePusher {
+    fn push(&self, f: impl FnOnce(&mut tray::Indicator)) -> bool;
+}
+
+impl FramePusher for ksni::blocking::Handle<tray::Indicator> {
+    fn push(&self, f: impl FnOnce(&mut tray::Indicator)) -> bool {
+        self.update(f).is_some()
+    }
+}
+
 /// Plays a pulse on the tray icon, one frame at a time, then clears the
 /// override so the icon falls back to whatever `bar`/`snap` already imply.
 ///
@@ -268,17 +282,16 @@ impl Daemon {
 /// `std::process::exit` directly from `ksni`'s own dispatch thread, which
 /// tears down the whole process — including this thread, mid-sleep if need
 /// be — regardless of how many frames are left.
-fn animate(handle: &ksni::blocking::Handle<tray::Indicator>, count: usize) {
+fn animate(handle: &impl FramePusher, count: usize) {
     for i in 0..count {
-        let updated = handle.update(move |t: &mut tray::Indicator| {
+        if !handle.push(move |t: &mut tray::Indicator| {
             t.pulse = Some((i, count));
-        });
-        if updated.is_none() {
+        }) {
             return;
         }
         std::thread::sleep(Duration::from_millis(icon::FRAME_INTERVAL_MS));
     }
-    handle.update(|t: &mut tray::Indicator| {
+    handle.push(|t: &mut tray::Indicator| {
         t.pulse = None;
     });
 }
@@ -571,6 +584,71 @@ mod tests {
             0
         );
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// A same-process stand-in for the tray handle, so `animate`'s loop can
+    /// be tested without a D-Bus connection or a display. Every `push`
+    /// mutates a scratch `Indicator` and records the resulting `pulse`
+    /// field, so the log shows exactly what the real tray would have been
+    /// told, in order.
+    struct FakeSink {
+        calls: std::cell::RefCell<Vec<Option<(usize, usize)>>>,
+        /// If `Some(n)`, `push` reports "tray gone" starting from the nth
+        /// call (0-indexed), so the early-abort path is reachable too.
+        gone_from: Option<usize>,
+    }
+
+    impl FakeSink {
+        fn new() -> Self {
+            FakeSink {
+                calls: std::cell::RefCell::new(Vec::new()),
+                gone_from: None,
+            }
+        }
+    }
+
+    impl FramePusher for FakeSink {
+        fn push(&self, f: impl FnOnce(&mut tray::Indicator)) -> bool {
+            let mut i =
+                tray::Indicator::new(bar_with_effect(render::Effect::None), Snapshot::default());
+            f(&mut i);
+            let n = self.calls.borrow().len();
+            self.calls.borrow_mut().push(i.pulse);
+            self.gone_from != Some(n)
+        }
+    }
+
+    #[test]
+    fn animate_drives_every_frame_in_order_then_clears() {
+        let sink = FakeSink::new();
+        animate(&sink, 5);
+        let calls = sink.calls.into_inner();
+        assert_eq!(
+            calls,
+            vec![
+                Some((0, 5)),
+                Some((1, 5)),
+                Some((2, 5)),
+                Some((3, 5)),
+                Some((4, 5)),
+                None,
+            ]
+        );
+    }
+
+    #[test]
+    fn animate_stops_pushing_once_the_tray_is_gone() {
+        let sink = FakeSink {
+            gone_from: Some(2),
+            ..FakeSink::new()
+        };
+        animate(&sink, 10);
+        // Calls 0 and 1 succeed; call 2 reports "gone" and animate returns
+        // immediately — no further frames, and no trailing clear either.
+        assert_eq!(
+            sink.calls.into_inner(),
+            vec![Some((0, 10)), Some((1, 10)), Some((2, 10))]
+        );
     }
 
     #[test]
