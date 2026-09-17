@@ -39,12 +39,14 @@ format = "{session}% · {weekly}%"
 # a value. Rules are checked top to bottom; the first match wins. `metric`
 # is one of "session", "weekly", "cost". `color` is a "#rrggbb" hex string.
 #
-# `effect = "pulse"` here WORKS: it sets the StatusNotifierItem status to
-# NeedsAttention instead of Active. Whether a host renders that any
-# differently (some flash the icon, most don't) is up to the host — this is
-# not an animation drawn by claude-usage itself, but it is a real, wired
-# effect. Do not confuse this with [reset].effect below, which is a
-# different key and does nothing.
+# `effect = "pulse"` here WORKS, two ways: it sets the StatusNotifierItem
+# status to NeedsAttention for as long as the rule stays matched (whether a
+# host renders that any differently is up to the host), and the moment the
+# level is actually crossed — not every cycle it stays crossed — the icon
+# also plays a short, fixed, 2-second frame-by-frame pulse of its own
+# drawing. There is no duration key here to tune that: rules have no
+# `duration` field, unlike [reset] below, which is a different key with its
+# own configurable length.
 #
 # [[bar.rules]]
 # metric = "weekly"
@@ -75,14 +77,13 @@ notify = true
 # desktop notification. This works.
 notify = true
 
-# --- Reserved, not implemented yet ---
 # `effect` and `duration` here are a DIFFERENT pair of keys from
-# [bar].rules[].effect above (that one works). These two are parsed but
-# currently IGNORED: the frame-by-frame animation they were meant to
-# configure was never wired up (the code that would have drawn it,
-# icon::pulse_frames, was removed as dead code); no visual change happens on
-# a window reset today beyond the notification above. Setting these two
-# keys has no effect. They are kept here so an existing config keeps
-# parsing if a future version wires them up.
+# [bar].rules[].effect above (which has no duration of its own). These two
+# WORK: on a window reset, `effect = "pulse"` plays a frame-by-frame pulse
+# of the icon for `duration` seconds. Anything other than "pulse" for
+# `effect`, or `duration = 0`, means no animation at all — silence, not a
+# one-frame flicker. `duration` is capped at 30 seconds regardless of what
+# is written here, so a very large value cannot leave the icon animating
+# indefinitely.
 effect = "pulse"
 duration = 2

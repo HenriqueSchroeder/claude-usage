@@ -101,13 +101,13 @@ nested under an `[events]` table):
 | `poll_seconds` | `60` | Floored to 10 |
 | `[bar].format` | `"{session}% · {weekly}%"` | Placeholders: `{session}`, `{weekly}`, `{session_reset}`, `{weekly_reset}`, `{reset}`, `{cost}`, `{project}`, `{model}`, `{tokens}` — see the note on `{reset}` below |
 | `[bar].rules` | `[]` | Array of `{metric, above, format?, color?, effect?}`; first match (top to bottom) wins |
-| `[bar].rules[].effect` | `"pulse"` (opt-in per rule) | **Works** — flips the tray status to `NeedsAttention`; see note below |
+| `[bar].rules[].effect` | `"pulse"` (opt-in per rule) | **Works** — flips the tray status to `NeedsAttention` and plays a brief frame-by-frame pulse the moment the level is crossed; see note below |
 | `[threshold].levels` | `[75, 90, 95]` | Percentages that trigger a notification |
 | `[threshold].hysteresis` | `2.0` | Points a level must drop below itself to rearm |
 | `[threshold].notify` | `true` | Works |
 | `[reset].notify` | `true` | Works |
-| `[reset].effect` | `"pulse"` | **Inert** — not the same key as `[bar].rules[].effect` above; see [Not yet implemented](#not-yet-implemented) |
-| `[reset].duration` | `2` | **Inert** — same |
+| `[reset].effect` | `"pulse"` | **Works** — `"pulse"` plays a frame-by-frame animation on the icon when a window resets; anything else (e.g. `"none"`) plays nothing |
+| `[reset].duration` | `2` | **Works** — how many seconds the reset animation plays; `0` plays nothing, regardless of `effect`. Capped at 30s |
 
 ### `{reset}` means the nearest window, not the weekly one
 
@@ -125,51 +125,66 @@ can be checked against the source.
 
 ### Two unrelated `effect` keys
 
-There are two `effect` keys in this config, and only one of them does
-anything:
+There are two `effect` keys in this config. They are unrelated to each
+other, and both work, but they trigger on different moments and one of them
+has no `duration` of its own:
 
-- `[bar].rules[].effect = "pulse"` **works today**. A matching rule sets the
-  StatusNotifierItem's status to `NeedsAttention` instead of `Active` (see
-  `src/render.rs` and `src/tray.rs::status()`). Whether the host renders
-  that any differently — some panels flash or highlight a `NeedsAttention`
-  icon, most don't — is up to the host, not this program. It is still a
-  real, wired effect, just not a custom animation.
-- `[reset].effect` and `[reset].duration` **do nothing**. See
-  [Not yet implemented](#not-yet-implemented).
+- `[bar].rules[].effect = "pulse"` sets the StatusNotifierItem's status to
+  `NeedsAttention` instead of `Active` for as long as the matching rule
+  stays matched (see `src/render.rs` and `src/tray.rs::status()`) — whether
+  the host renders that any differently is up to the host, not this
+  program. On top of that, the moment a threshold is actually *crossed*
+  (not every cycle it stays crossed), the icon plays a short, fixed,
+  2-second frame-by-frame pulse of its own drawing, independent of the host.
+  There is no config knob for that duration — rules have no `duration`
+  field — so it is a small fixed nudge, not something to tune.
+- `[reset].effect` and `[reset].duration` animate the icon, the same way,
+  when a quota window resets. `effect` must be exactly `"pulse"` — anything
+  else, including the empty string, means no animation — and `duration` is
+  in seconds, configurable, capped at 30 and floored at "0 means none".
+  Both of these must mean silence, not a one-frame flicker: turning the
+  feature off has to look like nothing happening, not a blink.
+
+Both animations are event-driven, not continuous: with no threshold
+crossing and no window reset, the daemon never touches the icon between
+polls, exactly as before this feature existed.
 
 ## Measured footprint
 
 RSS measured on the release binary, idle, with `poll_seconds` lowered to 10
 so several session-directory rediscovery cycles land inside the
-measurement window: **6572 KB after 5 seconds, unchanged at 45 seconds**
-(4+ rediscovery cycles over a 5326-file project tree) — call it **~6.6 MB**,
-against a 10240 KB budget. `ldd` on the release binary shows only `libc`,
-`libm`, `libgcc_s`, and the dynamic linker — no GTK, no GLib, no libdbus.
+measurement window: **6816 KB after 5 seconds, unchanged at 45 seconds**
+(4+ rediscovery cycles over the real `~/.claude/projects` tree) — call it
+**~6.8 MB**, against a 10240 KB budget. `ldd` on the release binary shows
+only `libc`, `libm`, `libgcc_s`, and the dynamic linker — no GTK, no GLib,
+no libdbus.
 
-## Not yet implemented
+## How the pulse animation is drawn
 
-- **A frame-by-frame pulse animation on window reset does not exist.**
-  `[reset].effect` and `[reset].duration` are parsed and stored, but nothing
-  in the daemon reads either field — the code that would have drawn an
-  animated icon (`icon::pulse_frames`) was removed as dead code during
-  development because nothing ever called it. A window reset today only
-  produces the notification configured by `[reset].notify`; there is no
-  accompanying visual change, animated or otherwise.
-  - This is unrelated to `[bar].rules[].effect = "pulse"` (see
-    [Configuration](#configuration)), which does work — it changes the tray
-    item's status, just not by drawing an animation.
-- The two `[reset]` keys are kept in the config schema so a config file
-  written against a future version that does implement this will not need
-  to change; for now, setting them does nothing.
+Both `effect = "pulse"` paths (a crossed `[bar].rules[]` entry and a
+`[reset]` window rollover) end up in the same place: `icon::pulse_frame`
+alpha-scales the same ring `icon::ring` draws every cycle, on a cosine curve
+that dims at both ends of the cycle and peaks in the middle.
+
+There is deliberately no dedicated animation thread. The main loop already
+sleeps between polls; it spends the first part of that sleep pushing frames
+to the tray (one `ksni::Handle::update` call per frame, `FRAME_INTERVAL_MS`
+apart) and sleeps the rest as before. That keeps the tray to a single writer
+— a second thread on its own timer would race the loop's normal per-cycle
+update, and whichever one landed last would decide whether the icon got
+stuck mid-pulse. The cost is that a pulse longer than the remaining sleep
+(only possible with a large `[reset].duration` against a short
+`poll_seconds`, especially its 10-second floor) delays the next poll by the
+difference; nothing crashes or hangs, the next reading is just a little
+late. When the animation ends, the override is cleared and the icon goes
+back to exactly the ring implied by the current reading — never a
+leftover frame.
 
 ## Roadmap
 
-Four things are deliberately not in v1. Listed here so "not built yet" reads
+Three things are deliberately not in v1. Listed here so "not built yet" reads
 as "not built yet," not "considered and rejected" or "the project is done":
 
-- **The reset "pulse" animation is absent.** See
-  [Not yet implemented](#not-yet-implemented) above for exactly which
-  config keys this affects (`[reset].effect`, `[reset].duration`) and why.
 - **Floating PiP overlay** — a GNOME Shell extension showing the ring
   always on top of other windows. Not in the daemon itself because Wayland
   doesn't let an ordinary application declare itself always-on-top:
