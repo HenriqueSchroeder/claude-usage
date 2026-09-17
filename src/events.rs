@@ -16,6 +16,22 @@ pub enum Event {
     Unauthorized,
 }
 
+/// A `resets_at` only counts as a fresh window when it advances by more than
+/// this many seconds.
+///
+/// The API returns `resets_at` with microsecond precision that changes on
+/// every call even when the underlying reset instant hasn't moved — two live
+/// calls 20 seconds apart have been observed returning the same reset
+/// instant with different fractional seconds (`.400922` vs `.693440`).
+/// Comparing whole-second-truncated timestamps with a bare `>` treats that
+/// jitter as a reset the moment its fractional part crosses a second
+/// boundary. The margin has to clear that noise (observed well under a
+/// second) with room to spare, while staying far below the smallest real
+/// advance, which is the 5-hour session window (18 000 seconds). 60 seconds
+/// clears the noise by roughly two orders of magnitude and stays 300 times
+/// smaller than the smallest genuine reset.
+const RESET_MARGIN_SECONDS: i64 = 60;
+
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct Persisted {
     #[serde(default)]
@@ -115,9 +131,11 @@ impl Detector {
             };
             // A resets_at further in the future than the one we last saw means
             // the window rolled over. More reliable than watching the
-            // percentage drop, which has other causes.
+            // percentage drop, which has other causes — but the timestamp
+            // itself carries sub-second server noise, so the advance has to
+            // clear RESET_MARGIN_SECONDS before it counts as real.
             if let (Some(new), Some(old)) = (ts, *last) {
-                if new > old && !first_run {
+                if new > old + RESET_MARGIN_SECONDS && !first_run {
                     events.push(Event::WindowReset { metric });
                 }
             }
@@ -259,6 +277,58 @@ mod tests {
         d.diff(&snap(50.0));
         assert!(!d
             .diff(&snap(51.0))
+            .iter()
+            .any(|e| matches!(e, Event::WindowReset { .. })));
+    }
+
+    // The API returns `resets_at` with microsecond precision that changes on
+    // every call even when the underlying reset instant hasn't moved. A
+    // one-second advance is exactly that noise crossing a second boundary —
+    // a genuine reset is five hours (session) or seven days (weekly) away.
+    #[test]
+    fn a_one_second_jitter_is_not_a_window_reset_weekly() {
+        let mut d = Detector::new(cfg());
+        let mut base = snap(50.0);
+        base.quota.as_mut().unwrap().weekly.resets_at = Some(datetime!(2026-09-16 07:00:00 UTC));
+        d.diff(&base);
+
+        let mut jittered = snap(51.0);
+        jittered.quota.as_mut().unwrap().weekly.resets_at =
+            Some(datetime!(2026-09-16 07:00:01 UTC));
+        assert!(!d
+            .diff(&jittered)
+            .iter()
+            .any(|e| matches!(e, Event::WindowReset { .. })));
+
+        let mut real_reset = snap(3.0);
+        real_reset.quota.as_mut().unwrap().weekly.resets_at =
+            Some(datetime!(2026-09-16 12:00:01 UTC));
+        assert!(d
+            .diff(&real_reset)
+            .iter()
+            .any(|e| matches!(e, Event::WindowReset { .. })));
+    }
+
+    #[test]
+    fn a_one_second_jitter_is_not_a_window_reset_session() {
+        let mut d = Detector::new(cfg());
+        let mut base = snap_session(50.0);
+        base.quota.as_mut().unwrap().session.resets_at = Some(datetime!(2026-09-16 07:00:00 UTC));
+        d.diff(&base);
+
+        let mut jittered = snap_session(51.0);
+        jittered.quota.as_mut().unwrap().session.resets_at =
+            Some(datetime!(2026-09-16 07:00:01 UTC));
+        assert!(!d
+            .diff(&jittered)
+            .iter()
+            .any(|e| matches!(e, Event::WindowReset { .. })));
+
+        let mut real_reset = snap_session(3.0);
+        real_reset.quota.as_mut().unwrap().session.resets_at =
+            Some(datetime!(2026-09-16 12:00:01 UTC));
+        assert!(d
+            .diff(&real_reset)
             .iter()
             .any(|e| matches!(e, Event::WindowReset { .. })));
     }
