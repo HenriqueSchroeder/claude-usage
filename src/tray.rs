@@ -51,7 +51,7 @@ fn info(label: String) -> MenuItem<Indicator> {
     .into()
 }
 
-/// One quota row: `label  percent%  ·  time`, e.g. `5h  2%  ·  4h51m`.
+/// One quota row: `label  ·  percent%  ·  time`, e.g. `5h  ·  2%  ·  4h51m`.
 ///
 /// `time` is what gives `{reset}` on the panel something to be checked
 /// against: the bar shows the nearest of the two windows, and only here can
@@ -69,7 +69,7 @@ fn quota_line(
 ) -> String {
     let time = remaining.map_or_else(|| NO_VALUE.into(), human_duration);
     format!(
-        "{label}  {percent:.0}%  ·  {time}{}",
+        "{label}  ·  {percent:.0}%  ·  {time}{}",
         severity_note(severity)
     )
 }
@@ -300,7 +300,7 @@ mod tests {
                 Some(time::Duration::minutes(291)),
                 Severity::Normal
             ),
-            "5h  2%  ·  4h51m"
+            "5h  ·  2%  ·  4h51m"
         );
         assert_eq!(
             quota_line(
@@ -309,7 +309,7 @@ mod tests {
                 Some(time::Duration::minutes(8400)),
                 Severity::Normal
             ),
-            "Semanal  26%  ·  5d20h"
+            "Semanal  ·  26%  ·  5d20h"
         );
     }
 
@@ -317,7 +317,7 @@ mod tests {
     fn a_quota_line_shows_a_dash_instead_of_a_zero_when_there_is_no_reset_time() {
         assert_eq!(
             quota_line("5h", 2.0, None, Severity::Normal),
-            "5h  2%  ·  —"
+            "5h  ·  2%  ·  —"
         );
     }
 
@@ -325,7 +325,7 @@ mod tests {
     fn a_quota_line_still_appends_the_severity_note() {
         assert_eq!(
             quota_line("Semanal", 96.0, None, Severity::Critical),
-            "Semanal  96%  ·  —  (crítico)"
+            "Semanal  ·  96%  ·  —  (crítico)"
         );
     }
 
@@ -369,8 +369,8 @@ mod tests {
         // Not checking the exact minute: the countdown is read against
         // `OffsetDateTime::now_utc()` inside `menu()`, a moment after this
         // test computed `resets_at`, so the rendered minute can be one off.
-        assert!(labels.iter().any(|l| l.starts_with("5h  2%  ·  4h")));
-        assert!(labels.iter().any(|l| l == "Semanal  26%  ·  —"));
+        assert!(labels.iter().any(|l| l.starts_with("5h  ·  2%  ·  4h")));
+        assert!(labels.iter().any(|l| l == "Semanal  ·  26%  ·  —"));
         assert!(!labels
             .iter()
             .any(|l| l.contains("reset") || l.contains("Sessão")));
