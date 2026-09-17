@@ -1,4 +1,4 @@
-use crate::icon::ring;
+use crate::icon::{pulse_frame, ring};
 use crate::quota::Severity;
 use crate::render::{human_duration, BarOutput, Effect};
 use crate::state::{Health, Snapshot};
@@ -10,10 +10,18 @@ use time::OffsetDateTime;
 ///
 /// Everything it shows is derived from `snap` and `bar` on demand; it keeps
 /// no percentages of its own, which is what stops the label and the menu
-/// from ever disagreeing.
+/// from ever disagreeing. `pulse` is the one transient exception: it
+/// overrides the icon for a single animation frame and is always cleared
+/// back to `None` when the animation ends.
 pub struct Indicator {
     pub bar: BarOutput,
     pub snap: Snapshot,
+    /// Set by the main loop while a pulse animation is playing:
+    /// `Some((frame, count))` overrides the drawn icon with that one frame.
+    /// `None` is the steady state — both the resting condition and what an
+    /// animation is cleared back to when it ends — and draws exactly the
+    /// ring `bar`/`snap` already imply.
+    pub pulse: Option<(usize, usize)>,
     /// Whether the missing-host diagnostic has already been printed. `ksni`
     /// hands `watcher_offline` a `&self`, and the alternative to an atomic
     /// here is one identical line in the journal per reconnection attempt.
@@ -25,6 +33,7 @@ impl Indicator {
         Indicator {
             bar,
             snap,
+            pulse: None,
             offline_reported: AtomicBool::new(false),
         }
     }
@@ -93,7 +102,10 @@ impl Indicator {
             .map(|&s| Icon {
                 width: s,
                 height: s,
-                data: ring(percent, self.bar.color, s as u32),
+                data: match self.pulse {
+                    Some((i, count)) => pulse_frame(percent, self.bar.color, s as u32, i, count),
+                    None => ring(percent, self.bar.color, s as u32),
+                },
             })
             .collect()
     }
@@ -273,6 +285,23 @@ mod tests {
         assert_eq!(
             reset_note(Some(time::Duration::minutes(130))),
             "  reset em 2h10"
+        );
+    }
+
+    #[test]
+    fn a_pulse_frame_overrides_the_icon_and_clearing_it_restores_the_steady_state() {
+        let mut t = indicator();
+        let steady: Vec<Vec<u8>> = t.icon_pixmap().into_iter().map(|i| i.data).collect();
+
+        t.pulse = Some((0, 10));
+        let mid: Vec<Vec<u8>> = t.icon_pixmap().into_iter().map(|i| i.data).collect();
+        assert_ne!(mid, steady, "a pulse frame must not look identical to rest");
+
+        t.pulse = None;
+        let restored: Vec<Vec<u8>> = t.icon_pixmap().into_iter().map(|i| i.data).collect();
+        assert_eq!(
+            restored, steady,
+            "clearing the pulse must return exactly the state bar/snap imply"
         );
     }
 

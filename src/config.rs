@@ -65,6 +65,25 @@ impl Default for ResetConfig {
     }
 }
 
+/// Ceiling on an animation's length, in seconds.
+///
+/// A misconfigured huge `duration` would otherwise push a frame every
+/// `icon::FRAME_INTERVAL_MS` for however long the value says, one D-Bus
+/// update at a time, instead of the brief nudge the feature is for.
+const MAX_PULSE_SECONDS: u64 = 30;
+
+impl ResetConfig {
+    /// The animation length to use, or `None` for "do not animate".
+    ///
+    /// Both `effect = "none"` and `duration = 0` mean silence, not a
+    /// degenerate one-frame flicker — a user turning this off must get
+    /// nothing, not a blink.
+    pub fn pulse_duration(&self) -> Option<u64> {
+        (self.effect == "pulse" && self.duration > 0)
+            .then_some(self.duration.min(MAX_PULSE_SECONDS))
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -145,5 +164,37 @@ effect = "pulse"
         let c = parse("poll_seconds = 15");
         assert_eq!(c.poll_seconds, 15);
         assert_eq!(c.threshold.hysteresis, 2.0);
+    }
+
+    #[test]
+    fn reset_pulse_duration_is_some_for_the_default() {
+        assert_eq!(ResetConfig::default().pulse_duration(), Some(2));
+    }
+
+    #[test]
+    fn reset_pulse_duration_is_none_when_effect_is_not_pulse() {
+        let r = ResetConfig {
+            effect: "none".into(),
+            ..ResetConfig::default()
+        };
+        assert_eq!(r.pulse_duration(), None);
+    }
+
+    #[test]
+    fn reset_pulse_duration_is_none_when_duration_is_zero() {
+        let r = ResetConfig {
+            duration: 0,
+            ..ResetConfig::default()
+        };
+        assert_eq!(r.pulse_duration(), None);
+    }
+
+    #[test]
+    fn reset_pulse_duration_is_capped() {
+        let r = ResetConfig {
+            duration: 999,
+            ..ResetConfig::default()
+        };
+        assert_eq!(r.pulse_duration(), Some(30));
     }
 }

@@ -21,6 +21,13 @@ const BACKOFF_CAP_SECONDS: u64 = 900;
 /// Floor for `poll_seconds`: a config saying 0 must not turn the loop into
 /// a request flood.
 const MIN_POLL_SECONDS: u64 = 10;
+/// How long a threshold-crossing pulse animates.
+///
+/// `[bar].rules[]` has no `duration` field of its own — only `effect` — so
+/// this is a fixed, short nudge rather than a new config knob nobody asked
+/// for. `[reset].duration` is the one animation length that is configurable,
+/// because that is the key the owner actually asked for.
+const THRESHOLD_PULSE_SECONDS: u64 = 2;
 const HTTP_TIMEOUT: Duration = Duration::from_secs(15);
 /// How often to re-stat `.credentials.json` while backing off. Only while
 /// backing off — a healthy loop sleeps through its whole interval.
@@ -141,8 +148,9 @@ impl Daemon {
 
     /// One poll: read the quota, fold in the active session, notify on what
     /// changed, and render the bar. Never fails; every problem it meets ends
-    /// up in `Snapshot::health`.
-    fn cycle(&mut self, now: OffsetDateTime) -> (Snapshot, render::BarOutput) {
+    /// up in `Snapshot::health`. The events returned are what just happened
+    /// this cycle — the caller uses them to decide whether to animate.
+    fn cycle(&mut self, now: OffsetDateTime) -> (Snapshot, render::BarOutput, Vec<events::Event>) {
         let mut snap = Snapshot::default();
         self.read_quota(&mut snap);
         // The last good reading outlives a failed poll; `health` is what says
@@ -168,7 +176,35 @@ impl Daemon {
         self.detector.save(&self.state_path);
 
         let bar = render::render(&self.cfg.bar, &snap, now);
-        (snap, bar)
+        (snap, bar, events)
+    }
+
+    /// How long to animate the icon after this cycle's events, or 0 for none.
+    ///
+    /// Both mechanisms are event-driven on purpose: a rule that stays
+    /// matched, or a `[reset].effect` left at "pulse", must not replay the
+    /// animation on every single cycle — only the crossing/reset moment
+    /// itself does. A window reset wins if both fire in the same cycle
+    /// (rare): it has an explicit, user-configured duration, while the
+    /// threshold pulse below is a fixed nudge with no duration of its own.
+    fn pulse_seconds(&self, events: &[events::Event], bar: &render::BarOutput) -> u64 {
+        let reset_fired = events
+            .iter()
+            .any(|e| matches!(e, events::Event::WindowReset { .. }));
+        if reset_fired {
+            if let Some(secs) = self.cfg.reset.pulse_duration() {
+                return secs;
+            }
+        }
+
+        let threshold_fired = events
+            .iter()
+            .any(|e| matches!(e, events::Event::ThresholdCrossed { .. }));
+        if threshold_fired && bar.effect == render::Effect::Pulse {
+            return THRESHOLD_PULSE_SECONDS;
+        }
+
+        0
     }
 
     fn wait_seconds(&self) -> u64 {
@@ -187,12 +223,21 @@ impl Daemon {
 
     /// Waits until the next poll is due.
     ///
+    /// `pulse_debt` is how many seconds the previous cycle already spent
+    /// animating the icon (0 most of the time); it is subtracted from the
+    /// normal interval so the animation eats into the existing gap between
+    /// polls instead of adding to it. If a pulse ever ran longer than the
+    /// gap itself (`[reset].duration` set past `poll_seconds`, especially at
+    /// the 10s floor), the saturating subtraction floors at zero rather than
+    /// underflowing, and the next poll simply lands late by the difference —
+    /// a documented cost, not a panic.
+    ///
     /// While healthy this is a plain sleep. While backing off it also watches
     /// the credentials file: Claude Code rewrites it when the user
     /// re-authenticates, and making them sit out a 15-minute backoff after
     /// they have already fixed the problem is its own kind of broken.
-    fn wait(&mut self) {
-        let seconds = self.wait_seconds();
+    fn wait(&mut self, pulse_debt: u64) {
+        let seconds = self.wait_seconds().saturating_sub(pulse_debt);
         if self.failures == 0 {
             std::thread::sleep(Duration::from_secs(seconds));
             return;
@@ -207,6 +252,35 @@ impl Daemon {
             }
         }
     }
+}
+
+/// Plays a pulse on the tray icon, one frame at a time, then clears the
+/// override so the icon falls back to whatever `bar`/`snap` already imply.
+///
+/// Deliberately not a background thread: `ksni`'s `Handle::update` is the
+/// only way to change what the tray shows, and if a second thread called it
+/// on its own timer while this loop's normal per-cycle update also called
+/// it, the two would race — whichever update lands last wins, which can
+/// leave the icon stuck mid-pulse. Calling it only from here, synchronously,
+/// between cycles, means there is exactly one writer, ever.
+///
+/// A shutdown does not wait on this: the "Sair" menu item calls
+/// `std::process::exit` directly from `ksni`'s own dispatch thread, which
+/// tears down the whole process — including this thread, mid-sleep if need
+/// be — regardless of how many frames are left.
+fn animate(handle: &ksni::blocking::Handle<tray::Indicator>, count: usize) {
+    for i in 0..count {
+        let updated = handle.update(move |t: &mut tray::Indicator| {
+            t.pulse = Some((i, count));
+        });
+        if updated.is_none() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(icon::FRAME_INTERVAL_MS));
+    }
+    handle.update(|t: &mut tray::Indicator| {
+        t.pulse = None;
+    });
 }
 
 fn main() {
@@ -230,8 +304,9 @@ fn main() {
     };
 
     // First reading before the item appears, so the panel never shows a
-    // placeholder percentage.
-    let (snap, bar) = daemon.cycle(OffsetDateTime::now_utc());
+    // placeholder percentage. The first cycle never yields events (the
+    // detector is silent on its first diff), so there is nothing to animate.
+    let (snap, bar, _events) = daemon.cycle(OffsetDateTime::now_utc());
 
     let handle = match tray::Indicator::new(bar, snap)
         .assume_sni_available(true)
@@ -244,12 +319,15 @@ fn main() {
         }
     };
 
+    let mut pulse_debt = 0;
     loop {
-        daemon.wait();
-        let (snap, bar) = daemon.cycle(OffsetDateTime::now_utc());
+        daemon.wait(pulse_debt);
+        let (snap, bar, events) = daemon.cycle(OffsetDateTime::now_utc());
+        let pulse_secs = daemon.pulse_seconds(&events, &bar);
         let updated = handle.update(move |t: &mut tray::Indicator| {
             t.bar = bar;
             t.snap = snap;
+            t.pulse = None;
         });
         if updated.is_none() {
             // Nothing left to draw on. Exit non-zero on purpose: a clean exit
@@ -257,6 +335,12 @@ fn main() {
             // an indicator and without a line in the journal saying why.
             eprintln!("claude-usage: lost the tray connection, exiting to be restarted");
             std::process::exit(1);
+        }
+
+        pulse_debt = 0;
+        if pulse_secs > 0 {
+            animate(&handle, icon::frame_count(pulse_secs));
+            pulse_debt = pulse_secs;
         }
     }
 }
@@ -340,7 +424,7 @@ mod tests {
         q.weekly.percent = 83.0;
         let mut d = offline_daemon(&dir, Some(q));
 
-        let (snap, bar) = d.cycle(NOW);
+        let (snap, bar, _events) = d.cycle(NOW);
 
         // The credentials are gone, and health says exactly that...
         assert_eq!(snap.health, Health::NoCredentials);
@@ -355,7 +439,7 @@ mod tests {
     #[test]
     fn a_failed_poll_with_nothing_ever_read_carries_no_quota() {
         let dir = scratch("nocarry");
-        let (snap, bar) = offline_daemon(&dir, None).cycle(NOW);
+        let (snap, bar, _events) = offline_daemon(&dir, None).cycle(NOW);
         assert!(snap.quota.is_none());
         assert_eq!(bar.text, "⚠ sem credencial");
         std::fs::remove_dir_all(dir).ok();
@@ -402,6 +486,90 @@ mod tests {
         assert_eq!(session.tokens.output, 7);
         assert!(d.tailer.as_ref().map(session::Tailer::path) == Some(new.as_path()));
 
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    fn bar_with_effect(effect: render::Effect) -> render::BarOutput {
+        render::BarOutput {
+            text: String::new(),
+            color: render::DEFAULT_COLOR,
+            effect,
+        }
+    }
+
+    #[test]
+    fn no_events_means_no_pulse() {
+        let dir = scratch("pulse-none");
+        let d = offline_daemon(&dir, None);
+        assert_eq!(
+            d.pulse_seconds(&[], &bar_with_effect(render::Effect::Pulse)),
+            0
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn a_window_reset_with_pulse_configured_animates_for_its_duration() {
+        let dir = scratch("pulse-reset");
+        let mut d = offline_daemon(&dir, None);
+        d.cfg.reset.effect = "pulse".into();
+        d.cfg.reset.duration = 3;
+        let events = [events::Event::WindowReset {
+            metric: events::Metric::Weekly,
+        }];
+        assert_eq!(
+            d.pulse_seconds(&events, &bar_with_effect(render::Effect::None)),
+            3
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn a_window_reset_with_effect_none_does_not_animate() {
+        let dir = scratch("pulse-reset-off");
+        let mut d = offline_daemon(&dir, None);
+        d.cfg.reset.effect = "none".into();
+        let events = [events::Event::WindowReset {
+            metric: events::Metric::Weekly,
+        }];
+        assert_eq!(
+            d.pulse_seconds(&events, &bar_with_effect(render::Effect::None)),
+            0
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn a_window_reset_with_zero_duration_does_not_animate() {
+        let dir = scratch("pulse-reset-zero");
+        let mut d = offline_daemon(&dir, None);
+        d.cfg.reset.duration = 0;
+        let events = [events::Event::WindowReset {
+            metric: events::Metric::Weekly,
+        }];
+        assert_eq!(
+            d.pulse_seconds(&events, &bar_with_effect(render::Effect::None)),
+            0
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn a_threshold_crossing_animates_only_when_the_matched_rule_pulses() {
+        let dir = scratch("pulse-threshold");
+        let d = offline_daemon(&dir, None);
+        let events = [events::Event::ThresholdCrossed {
+            metric: events::Metric::Weekly,
+            level: 90,
+        }];
+        assert_eq!(
+            d.pulse_seconds(&events, &bar_with_effect(render::Effect::Pulse)),
+            THRESHOLD_PULSE_SECONDS
+        );
+        assert_eq!(
+            d.pulse_seconds(&events, &bar_with_effect(render::Effect::None)),
+            0
+        );
         std::fs::remove_dir_all(dir).ok();
     }
 

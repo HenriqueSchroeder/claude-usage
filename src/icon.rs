@@ -65,6 +65,39 @@ pub fn ring(percent: f32, color: Rgb, size: u32) -> Vec<u8> {
     out
 }
 
+/// Interval between pushed animation frames.
+///
+/// Small enough to read as motion; large enough that a few seconds of
+/// animation is a handful of D-Bus updates, not hundreds.
+pub const FRAME_INTERVAL_MS: u64 = 80;
+
+/// How many frames a pulse lasting `duration_secs` needs, `FRAME_INTERVAL_MS`
+/// apart. Zero seconds is zero frames — deciding when a duration of zero (or
+/// an effect other than "pulse") means "do not animate at all" is the
+/// caller's job, not this arithmetic.
+pub fn frame_count(duration_secs: u64) -> usize {
+    (duration_secs.saturating_mul(1000) / FRAME_INTERVAL_MS) as usize
+}
+
+/// Alpha multiplier for frame `i` of a `count`-frame pulse cycle: dim at
+/// both ends, full brightness in the middle, moving on a cosine so the
+/// animation has no visible seam where it turns around.
+fn pulse_scale(i: usize, count: usize) -> f32 {
+    let phase = (i as f32 / count.max(1) as f32) * std::f32::consts::TAU;
+    0.45 + 0.55 * (1.0 - phase.cos()) / 2.0
+}
+
+/// One frame of a pulse: the same ring `ring` draws every cycle, alpha-scaled
+/// for its position in the animation.
+pub fn pulse_frame(percent: f32, color: Rgb, size: u32, i: usize, count: usize) -> Vec<u8> {
+    let scale = pulse_scale(i, count);
+    let mut frame = ring(percent, color, size);
+    for px in frame.chunks_mut(4) {
+        px[0] = (px[0] as f32 * scale) as u8;
+    }
+    frame
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -103,5 +136,35 @@ mod tests {
     #[test]
     fn zero_size_yields_empty_not_panic() {
         assert!(ring(50.0, RED, 0).is_empty());
+    }
+
+    #[test]
+    fn pulse_frames_vary_across_the_cycle() {
+        let count = 12;
+        let frames: Vec<Vec<u8>> = (0..count)
+            .map(|i| pulse_frame(50.0, RED, 22, i, count))
+            .collect();
+        assert!(frames.iter().any(|f| *f != frames[0]));
+    }
+
+    #[test]
+    fn zero_count_yields_no_frames() {
+        assert_eq!(frame_count(0), 0);
+    }
+
+    #[test]
+    fn frame_count_matches_the_configured_duration() {
+        assert_eq!(frame_count(2), 25); // 2000ms / 80ms
+        assert_eq!(frame_count(1), 12); // 1000ms / 80ms, truncated
+    }
+
+    #[test]
+    fn a_middle_frame_is_visibly_dimmer_than_the_steady_ring() {
+        // The steady ring is frame count=1 (no scaling at all). The first
+        // frame of a longer pulse starts near the dim floor of the curve, so
+        // it must not equal the unscaled ring.
+        let steady = ring(50.0, RED, 22);
+        let dim = pulse_frame(50.0, RED, 22, 0, 10);
+        assert_ne!(steady, dim);
     }
 }
