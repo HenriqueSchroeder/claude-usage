@@ -1,6 +1,6 @@
 use crate::icon::{pulse_frame, ring};
 use crate::quota::Severity;
-use crate::render::{human_duration, BarOutput, Effect};
+use crate::render::{compact_duration, human_duration, BarOutput, Effect, NO_VALUE};
 use crate::state::{Health, Snapshot};
 use ksni::{menu::StandardItem, Icon, MenuItem, OfflineReason, Status, Tray};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -51,15 +51,27 @@ fn info(label: String) -> MenuItem<Indicator> {
     .into()
 }
 
-/// When a window clears, shown beside its percentage.
+/// One quota row: `label  percent%  ·  time`, e.g. `5h  2%  ·  4h51m`.
 ///
-/// This is what gives `{reset}` on the panel something to be checked
+/// `time` is what gives `{reset}` on the panel something to be checked
 /// against: the bar shows the nearest of the two windows, and only here can
 /// the user see which one that was. Relative, not a wall-clock time —
-/// `time` cannot read the local UTC offset from a multi-threaded process,
-/// and an hour-wrong "reset 12:40" would be worse than no clock at all.
-fn reset_note(remaining: Option<time::Duration>) -> String {
-    remaining.map_or_else(String::new, |d| format!("  reset em {}", human_duration(d)))
+/// `time` (the crate) cannot read the local UTC offset from a
+/// multi-threaded process, and an hour-wrong wall-clock reset would be
+/// worse than no clock at all. `—` (the project's usual placeholder, see
+/// `render::NO_VALUE`) stands in when the endpoint never said, same as
+/// everywhere else on the panel.
+fn quota_line(
+    label: &str,
+    percent: f32,
+    remaining: Option<time::Duration>,
+    severity: Severity,
+) -> String {
+    let time = remaining.map_or_else(|| NO_VALUE.into(), compact_duration);
+    format!(
+        "{label}  {percent:.0}%  ·  {time}{}",
+        severity_note(severity)
+    )
 }
 
 /// The endpoint's own verdict on a window, shown beside our percentage.
@@ -184,17 +196,17 @@ impl Tray for Indicator {
                 // Read at the moment the menu opens, not at the last poll:
                 // the countdown shown is the countdown as of now.
                 let now = OffsetDateTime::now_utc();
-                items.push(info(format!(
-                    "Sessão 5h      {:.0}%{}{}",
+                items.push(info(quota_line(
+                    "5h",
                     self.snap.session_pct(),
-                    reset_note(self.snap.session_reset_in(now)),
-                    severity_note(q.session.severity)
+                    self.snap.session_reset_in(now),
+                    q.session.severity,
                 )));
-                items.push(info(format!(
-                    "Semanal        {:.0}%{}{}",
+                items.push(info(quota_line(
+                    "Semanal",
                     self.snap.weekly_pct(),
-                    reset_note(self.snap.weekly_reset_in(now)),
-                    severity_note(q.weekly.severity)
+                    self.snap.weekly_reset_in(now),
+                    q.weekly.severity,
                 )));
                 for row in &q.breakdown {
                     if row.percent > 0.0 {
@@ -280,11 +292,40 @@ mod tests {
     }
 
     #[test]
-    fn a_reset_note_is_empty_when_the_window_has_no_reset_time() {
-        assert_eq!(reset_note(None), "");
+    fn a_quota_line_is_label_percent_dot_time() {
         assert_eq!(
-            reset_note(Some(time::Duration::minutes(130))),
-            "  reset em 2h10"
+            quota_line(
+                "5h",
+                2.0,
+                Some(time::Duration::minutes(291)),
+                Severity::Normal
+            ),
+            "5h  2%  ·  4h51m"
+        );
+        assert_eq!(
+            quota_line(
+                "Semanal",
+                26.0,
+                Some(time::Duration::minutes(8400)),
+                Severity::Normal
+            ),
+            "Semanal  26%  ·  5d20h"
+        );
+    }
+
+    #[test]
+    fn a_quota_line_shows_a_dash_instead_of_a_zero_when_there_is_no_reset_time() {
+        assert_eq!(
+            quota_line("5h", 2.0, None, Severity::Normal),
+            "5h  2%  ·  —"
+        );
+    }
+
+    #[test]
+    fn a_quota_line_still_appends_the_severity_note() {
+        assert_eq!(
+            quota_line("Semanal", 96.0, None, Severity::Critical),
+            "Semanal  96%  ·  —  (crítico)"
         );
     }
 
@@ -303,6 +344,36 @@ mod tests {
             restored, steady,
             "clearing the pulse must return exactly the state bar/snap imply"
         );
+    }
+
+    #[test]
+    fn the_menu_renders_the_compact_quota_lines_end_to_end() {
+        let mut t = indicator();
+        let mut q = crate::quota::Quota::default();
+        q.session.percent = 2.0;
+        q.weekly.percent = 26.0;
+        // Session clears in ~4h51m; weekly carries no resets_at at all,
+        // which must render a dash rather than a fabricated time.
+        q.session.resets_at = Some(OffsetDateTime::now_utc() + time::Duration::minutes(291));
+        t.snap.quota = Some(q);
+
+        let labels: Vec<String> = t
+            .menu()
+            .iter()
+            .filter_map(|i| match i {
+                MenuItem::Standard(s) => Some(s.label.clone()),
+                _ => None,
+            })
+            .collect();
+
+        // Not checking the exact minute: the countdown is read against
+        // `OffsetDateTime::now_utc()` inside `menu()`, a moment after this
+        // test computed `resets_at`, so the rendered minute can be one off.
+        assert!(labels.iter().any(|l| l.starts_with("5h  2%  ·  4h")));
+        assert!(labels.iter().any(|l| l == "Semanal  26%  ·  —"));
+        assert!(!labels
+            .iter()
+            .any(|l| l.contains("reset") || l.contains("Sessão")));
     }
 
     #[test]

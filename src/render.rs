@@ -59,6 +59,27 @@ pub fn human_duration(d: time::Duration) -> String {
     }
 }
 
+/// Compact, unit-suffixed duration for the tray menu's quota lines.
+///
+/// Drops precision as the magnitude grows: minutes alone under an hour,
+/// hours+minutes under a day, whole days+hours from a day up — at that
+/// scale minutes are noise. This differs from `human_duration` (no day
+/// rollover, no trailing `m`) because that one feeds the single-line bar
+/// text, where the terser, non-suffixed form is the established contract;
+/// changing it would change what every configured `{reset}` template
+/// prints today.
+pub fn compact_duration(d: time::Duration) -> String {
+    let total = d.whole_minutes().max(0);
+    let days = total / (24 * 60);
+    if days > 0 {
+        format!("{days}d{:02}h", (total / 60) % 24)
+    } else if total >= 60 {
+        format!("{}h{:02}m", total / 60, total % 60)
+    } else {
+        format!("{total}m")
+    }
+}
+
 /// How old the reading on screen is.
 ///
 /// Integer division renders the first minute of an outage as `0m`, which
@@ -390,6 +411,14 @@ mod tests {
         assert_eq!(stale_age(0), "<1m");
         assert_eq!(stale_age(59), "<1m");
         assert_eq!(stale_age(60), "1m");
+    }
+
+    #[test]
+    fn compact_duration_drops_precision_as_magnitude_grows() {
+        assert_eq!(compact_duration(time::Duration::minutes(51)), "51m");
+        assert_eq!(compact_duration(time::Duration::minutes(291)), "4h51m");
+        // A day or more rounds to hours; minutes are noise at that scale.
+        assert_eq!(compact_duration(time::Duration::minutes(8400)), "5d20h");
     }
 
     #[test]
