@@ -4,6 +4,7 @@ mod diag;
 mod events;
 mod icon;
 mod notify;
+mod persist;
 mod pricing;
 mod quota;
 mod render;
@@ -53,10 +54,17 @@ struct Daemon {
     tailer: Option<session::Tailer>,
     detector: events::Detector,
     notifier: Option<notify::Notifier>,
+    /// Where the last reading is cached between runs. Sibling of
+    /// `state_path`, and written for the same reason: what the daemon knows
+    /// should not die with the process that learned it.
+    cache_path: PathBuf,
     /// Last successful reading, kept so a failed poll shows stale truth
     /// instead of a fresh-looking zero.
     last_quota: Option<quota::Quota>,
-    last_ok: Option<Instant>,
+    /// When every window was last fresh. Absolute rather than an `Instant`
+    /// because it is restored from disk at startup, and a monotonic clock
+    /// means nothing across a reboot or a suspend.
+    last_ok: Option<OffsetDateTime>,
     notes: diag::Notes,
     failures: u32,
 }
@@ -72,7 +80,7 @@ struct Merged {
 }
 
 impl Daemon {
-    fn read_quota(&mut self, snap: &mut Snapshot) {
+    fn read_quota(&mut self, snap: &mut Snapshot, now: OffsetDateTime) {
         let token = match creds::read_access_token(&self.creds_path) {
             Ok(t) => t,
             Err(e) => {
@@ -93,7 +101,7 @@ impl Daemon {
                         None => {
                             snap.health = Health::Ok;
                             self.notes.clear();
-                            self.last_ok = Some(Instant::now());
+                            self.last_ok = Some(now);
                         }
                         Some(window) => {
                             // Only part of this reading is fresh; saying
@@ -105,7 +113,7 @@ impl Daemon {
                             // keeps growing across consecutive partial
                             // polls instead of resetting to near-zero.
                             snap.health = Health::Stale {
-                                seconds: self.last_ok.map_or(0, |t| t.elapsed().as_secs()),
+                                seconds: self.age_seconds(now),
                             };
                             self.notes.say(format!(
                                 "usage response missing the {window} window; \
@@ -113,8 +121,15 @@ impl Daemon {
                             ));
                         }
                     }
-                    self.last_quota = Some(merged.quota);
                     self.failures = 0;
+                    // Dated by `last_ok`, not by `now`: a partial merge is
+                    // only as fresh as the reading it borrowed from, and
+                    // stamping it with the current time would let a run of
+                    // partial polls keep a week-old window looking new
+                    // across a restart.
+                    let fetched_at = self.last_ok.unwrap_or(now);
+                    persist::save(&self.cache_path, &merged.quota, fetched_at);
+                    self.last_quota = Some(merged.quota);
                 }
                 None => self.note_failure(
                     snap,
@@ -123,9 +138,10 @@ impl Daemon {
                          reading to fall back on"
                             .into(),
                     ),
+                    now,
                 ),
             },
-            Err(e) => self.note_failure(snap, e),
+            Err(e) => self.note_failure(snap, e, now),
         }
     }
 
@@ -172,10 +188,20 @@ impl Daemon {
     /// an expired refresh token used to be exempt, which meant one 401 per
     /// `poll_seconds`, forever, from an identifiable User-Agent against an
     /// endpoint that is not public. Backing off is the whole point.
-    fn note_failure(&mut self, snap: &mut Snapshot, e: quota::FetchError) {
+    /// How long ago every window was last fresh, in seconds.
+    ///
+    /// Saturates at zero instead of wrapping: `last_ok` can sit in the future
+    /// if the system clock steps backwards, and a negative age cast to `u64`
+    /// would render as several billion seconds of staleness.
+    fn age_seconds(&self, now: OffsetDateTime) -> u64 {
+        self.last_ok
+            .map_or(0, |t| (now - t).whole_seconds().max(0) as u64)
+    }
+
+    fn note_failure(&mut self, snap: &mut Snapshot, e: quota::FetchError, now: OffsetDateTime) {
         self.failures = self.failures.saturating_add(1);
         let stale = Health::Stale {
-            seconds: self.last_ok.map_or(0, |t| t.elapsed().as_secs()),
+            seconds: self.age_seconds(now),
         };
         match e {
             quota::FetchError::Unauthorized => {
@@ -232,7 +258,7 @@ impl Daemon {
     /// this cycle — the caller uses them to decide whether to animate.
     fn cycle(&mut self, now: OffsetDateTime) -> (Snapshot, render::BarOutput, Vec<events::Event>) {
         let mut snap = Snapshot::default();
-        self.read_quota(&mut snap);
+        self.read_quota(&mut snap, now);
         // The last good reading outlives a failed poll; `health` is what says
         // how much to trust it.
         snap.quota = self.last_quota.clone();
@@ -379,6 +405,12 @@ fn animate(handle: &impl FramePusher, count: usize) {
 fn main() {
     let cfg = config::load(&home().join(".config/claude-usage/config.toml"));
     let state_path = home().join(".local/state/claude-usage/state.json");
+    let cache_path = state_path.with_file_name("quota.json");
+    let now = OffsetDateTime::now_utc();
+    // Restores the last reading so a restart mid-outage shows stale truth
+    // rather than a blank bar. `health` still reports the age, so nothing
+    // here passes a cached number off as a current one.
+    let (last_quota, last_ok) = persist::load(&cache_path, now).unzip();
 
     let mut daemon = Daemon {
         agent: ureq::AgentBuilder::new().timeout(HTTP_TIMEOUT).build(),
@@ -389,9 +421,10 @@ fn main() {
         // Filled by the first cycle's `refresh_tailer`.
         tailer: None,
         state_path,
+        cache_path,
         cfg,
-        last_quota: None,
-        last_ok: None,
+        last_quota,
+        last_ok,
         notes: diag::Notes::default(),
         failures: 0,
     };
@@ -399,7 +432,7 @@ fn main() {
     // First reading before the item appears, so the panel never shows a
     // placeholder percentage. The first cycle never yields events (the
     // detector is silent on its first diff), so there is nothing to animate.
-    let (snap, bar, _events) = daemon.cycle(OffsetDateTime::now_utc());
+    let (snap, bar, _events) = daemon.cycle(now);
 
     let handle = match tray::Indicator::new(bar, snap)
         .assume_sni_available(true)
@@ -473,6 +506,7 @@ mod tests {
             agent: ureq::AgentBuilder::new().build(),
             creds_path: dir.join("absent/.credentials.json"),
             state_path: dir.join("state.json"),
+            cache_path: dir.join("quota.json"),
             projects_dir: dir.join("projects"),
             tailer: None,
             detector: events::Detector::new(config::ThresholdConfig::default()),
@@ -493,13 +527,13 @@ mod tests {
         // Unauthorized used to be the exempt one: a dead refresh token meant
         // one 401 per poll, 1440 a day, against an endpoint that is not
         // public. It backs off like everything else now.
-        d.note_failure(&mut snap, quota::FetchError::Unauthorized);
+        d.note_failure(&mut snap, quota::FetchError::Unauthorized, NOW);
         assert_eq!(snap.health, Health::Unauthorized);
         assert_eq!(d.wait_seconds(), 60);
-        d.note_failure(&mut snap, quota::FetchError::Unauthorized);
+        d.note_failure(&mut snap, quota::FetchError::Unauthorized, NOW);
         assert_eq!(d.wait_seconds(), 120);
         for _ in 0..10 {
-            d.note_failure(&mut snap, quota::FetchError::Unauthorized);
+            d.note_failure(&mut snap, quota::FetchError::Unauthorized, NOW);
         }
         assert_eq!(d.wait_seconds(), BACKOFF_CAP_SECONDS);
 
@@ -882,6 +916,56 @@ mod tests {
         // The next morning the same file is still the newest transcript on
         // disk, and it is still not a session anybody is in.
         assert!(d.cycle(datetime!(2026-09-16 09:00 UTC)).0.session.is_none());
+
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn a_clock_that_steps_backwards_does_not_report_a_vast_age() {
+        let dir = scratch("clockskew");
+        let mut d = offline_daemon(&dir, None);
+        d.last_ok = Some(NOW + time::Duration::hours(1));
+
+        // Now that the age is absolute it can outrun the clock, which an
+        // `Instant` never could. Unsigned subtraction here would render as
+        // billions of seconds of staleness.
+        assert_eq!(d.age_seconds(NOW), 0);
+
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn a_restart_mid_outage_comes_back_with_the_last_reading() {
+        let dir = scratch("restart");
+        let cache = dir.join("quota.json");
+
+        // A daemon that had a good reading four minutes before it died.
+        let mut q = quota::Quota::default();
+        q.session.percent = 47.0;
+        q.weekly.percent = 26.0;
+        persist::save(&cache, &q, NOW - time::Duration::minutes(4));
+
+        // Its replacement starts the way `main` starts it, and the boundary
+        // is still broken.
+        let (last_quota, last_ok) = persist::load(&cache, NOW).unzip();
+        let mut d = offline_daemon(&dir, last_quota);
+        d.last_ok = last_ok;
+
+        let (mut snap, bar, _events) = d.cycle(NOW);
+
+        // The reading crossed the restart and reached the snapshot, so the
+        // menu is populated on the very first cycle.
+        assert_eq!(snap.session_pct(), 47.0);
+        assert_eq!(snap.weekly_pct(), 26.0);
+        // Absent credentials are what this particular daemon has to report...
+        assert_eq!(bar.text, "⚠ sem credencial");
+
+        // ...but in the case the cache exists for — a restart while the
+        // endpoint is rate limiting — the bar now has a number. Before this
+        // was persisted, `quota` was `None` here and the bar read
+        // "⚠ sem dados" however recently the daemon had known better.
+        snap.health = Health::Stale { seconds: 240 };
+        assert!(render::render(&d.cfg.bar, &snap, NOW).text.contains("47"));
 
         std::fs::remove_dir_all(dir).ok();
     }

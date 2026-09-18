@@ -19,6 +19,18 @@ impl From<&str> for Severity {
     }
 }
 
+impl Severity {
+    /// The inverse of the `From<&str>` above. The two live together so a name
+    /// can never be added to one without the other losing track of it.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Severity::Critical => "critical",
+            Severity::Warning => "warning",
+            Severity::Normal => "normal",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct Window {
     pub percent: f32,

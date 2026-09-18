@@ -72,24 +72,16 @@ impl Detector {
         detector
     }
 
-    /// Writes to a sibling `.tmp` and renames over the target.
+    /// Writes atomically, because a truncated state file is worse than none.
     ///
-    /// A crash partway through a plain `fs::write` leaves a truncated file;
-    /// `load` then fails to deserialise it, falls back to a default with
-    /// `seen: false`, and treats the next poll as a first run — which is
-    /// silent by design. The threshold crossing after a bad shutdown would
-    /// simply never be announced. Rename is atomic, so a reader sees either
-    /// the old state or the new one.
+    /// A crash partway through a plain write leaves a file `load` cannot
+    /// deserialise; it falls back to a default with `seen: false` and treats
+    /// the next poll as a first run — which is silent by design. The
+    /// threshold crossing after a bad shutdown would simply never be
+    /// announced.
     pub fn save(&self, path: &Path) {
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir).ok();
-        }
-        let Ok(json) = serde_json::to_vec(&self.state) else {
-            return;
-        };
-        let tmp = path.with_extension("json.tmp");
-        if std::fs::write(&tmp, json).is_ok() && std::fs::rename(&tmp, path).is_err() {
-            std::fs::remove_file(&tmp).ok();
+        if let Ok(json) = serde_json::to_vec(&self.state) {
+            crate::persist::atomic_write(path, &json).ok();
         }
     }
 
