@@ -9,6 +9,11 @@ pub struct Tokens {
 }
 
 impl Tokens {
+    /// No tokens of any kind, so no cost at any price.
+    pub fn is_empty(&self) -> bool {
+        *self == Tokens::default()
+    }
+
     pub fn add(&mut self, other: &Tokens) {
         self.input += other.input;
         self.output += other.output;
@@ -48,14 +53,26 @@ fn cost_of((pin, pout): (f64, f64), t: &Tokens) -> f64 {
 /// that model's own rate. On a Max plan the user pays nothing per token, so
 /// callers must label this as an estimate.
 ///
-/// `None` when any model in the mix is missing from the table. A partial sum
-/// would be indistinguishable from a complete one, and the day Anthropic
-/// ships an id this table has never seen, a confident `US$ 0.00` next to
-/// millions of tokens is the worst of the available answers.
+/// `None` when a model that actually spent tokens is missing from the table.
+/// A partial sum would be indistinguishable from a complete one, and the day
+/// Anthropic ships an id this table has never seen, a confident `US$ 0.00`
+/// next to millions of tokens is the worst of the available answers.
+///
+/// Entries that spent nothing are skipped before that test, because the
+/// condition is whether an unknown *cost* is being left out, not whether an
+/// unknown *name* is present. Transcripts carry `<synthetic>` for messages
+/// that never came from inference — an API error, an interruption — always
+/// with every counter at zero. Those are not a model the table is missing;
+/// they are not a model at all, and letting three of them erase the cost of
+/// two hundred million real tokens is the confident-wrong-answer failure
+/// running in the other direction.
 pub fn cost_usd(by_model: &HashMap<String, Tokens>) -> Option<f64> {
-    by_model.iter().try_fold(0.0, |acc, (model, t)| {
-        Some(acc + cost_of(prices_for(model)?, t))
-    })
+    by_model
+        .iter()
+        .filter(|(_, t)| !t.is_empty())
+        .try_fold(0.0, |acc, (model, t)| {
+            Some(acc + cost_of(prices_for(model)?, t))
+        })
 }
 
 #[cfg(test)]
@@ -163,5 +180,25 @@ mod tests {
             0.0,
         );
         approx(cost_usd(&HashMap::new()), 0.0);
+    }
+
+    #[test]
+    fn a_model_that_spent_nothing_does_not_erase_the_bill() {
+        // Real transcripts carry `<synthetic>` for messages that never came
+        // from inference, always with every counter at zero. Three of them
+        // were enough to blank the cost of a whole session.
+        let mut mixed = session([("claude-opus-5", million(|t| &mut t.input))]);
+        mixed.insert("<synthetic>".into(), Tokens::default());
+        approx(cost_usd(&mixed), 15.0);
+    }
+
+    #[test]
+    fn a_model_that_actually_spent_tokens_still_blanks_the_bill() {
+        // The guarantee this function exists for: an id the table has never
+        // seen, with real tokens behind it, must not be quietly priced at
+        // zero and summed into a confident total.
+        let mut mixed = session([("claude-opus-5", million(|t| &mut t.input))]);
+        mixed.insert("claude-from-the-future".into(), million(|t| &mut t.output));
+        assert_eq!(cost_usd(&mixed), None);
     }
 }
