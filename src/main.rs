@@ -343,6 +343,22 @@ impl Daemon {
         backoff.max(self.retry_after.unwrap_or(0))
     }
 
+    /// Sleeps up to `d`, reporting whether a menu click is what ended it.
+    ///
+    /// The line is printed unconditionally rather than through `Notes`: that
+    /// deduplicates, which is right for a boundary failing on a timer and
+    /// wrong for an action a person just took. Two clicks are two events,
+    /// and a click that produces no visible change — because the poll it
+    /// forced then failed — is exactly when the journal needs to say that
+    /// the click itself arrived.
+    fn nap(&self, d: Duration) -> bool {
+        let woken = self.wakeup.wait(d);
+        if woken {
+            eprintln!("claude-usage: manual refresh requested");
+        }
+        woken
+    }
+
     fn creds_mtime(&self) -> Option<std::time::SystemTime> {
         std::fs::metadata(&self.creds_path)
             .and_then(|m| m.modified())
@@ -375,14 +391,14 @@ impl Daemon {
     fn wait(&mut self, pulse_debt: u64) {
         let seconds = self.wait_seconds().saturating_sub(pulse_debt);
         if self.failures == 0 {
-            self.wakeup.wait(Duration::from_secs(seconds));
+            self.nap(Duration::from_secs(seconds));
             return;
         }
 
         let before = self.creds_mtime();
         let deadline = Instant::now() + Duration::from_secs(seconds);
         while let Some(left) = deadline.checked_duration_since(Instant::now()) {
-            if self.wakeup.wait(CREDS_CHECK_INTERVAL.min(left)) {
+            if self.nap(CREDS_CHECK_INTERVAL.min(left)) {
                 return;
             }
             if self.creds_mtime() != before {
