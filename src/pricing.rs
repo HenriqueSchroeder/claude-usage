@@ -201,4 +201,24 @@ mod tests {
         mixed.insert("claude-from-the-future".into(), million(|t| &mut t.output));
         assert_eq!(cost_usd(&mixed), None);
     }
+
+    #[test]
+    fn no_price_id_is_a_prefix_of_another() {
+        // `prices_for` takes the first entry the model id starts with, so a
+        // shorter id silently answers for a longer one: add ("claude-opus",
+        // ..) above ("claude-opus-5", ..) and every Opus 5 session is priced
+        // by the wrong row, with no error anywhere. The warning above PRICES
+        // has said so since the table was written; this is the part that
+        // fails the build.
+        //
+        // Checked in both directions, because the defect is the prefix
+        // relation itself — reordering the table hides it from one direction
+        // while leaving the next reorder free to reintroduce it.
+        for (i, (a, _, _)) in PRICES.iter().enumerate() {
+            for (b, _, _) in PRICES.iter().skip(i + 1) {
+                assert!(!b.starts_with(a), "{a} shadows {b}");
+                assert!(!a.starts_with(b), "{b} shadows {a}");
+            }
+        }
+    }
 }
