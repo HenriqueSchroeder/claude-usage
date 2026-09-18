@@ -65,6 +65,8 @@ struct Daemon {
     /// because it is restored from disk at startup, and a monotonic clock
     /// means nothing across a reboot or a suspend.
     last_ok: Option<OffsetDateTime>,
+    /// Seconds the server asked us to wait, from the last `Retry-After`.
+    retry_after: Option<u64>,
     notes: diag::Notes,
     failures: u32,
 }
@@ -122,6 +124,7 @@ impl Daemon {
                         }
                     }
                     self.failures = 0;
+                    self.retry_after = None;
                     // Dated by `last_ok`, not by `now`: a partial merge is
                     // only as fresh as the reading it borrowed from, and
                     // stamping it with the current time would let a run of
@@ -203,11 +206,22 @@ impl Daemon {
         let stale = Health::Stale {
             seconds: self.age_seconds(now),
         };
+        // Only a 429 carries an interval; anything else leaves the pacing to
+        // the exponential backoff, so a stale one must not outlive its cause.
+        self.retry_after = None;
         match e {
             quota::FetchError::Unauthorized => {
                 snap.health = Health::Unauthorized;
                 self.notes
                     .say("token rejected by the usage endpoint".into());
+            }
+            quota::FetchError::RateLimited { retry_after } => {
+                self.retry_after = retry_after;
+                snap.health = stale;
+                self.notes.say(match retry_after {
+                    Some(s) => format!("rate limited; the server asked for {s}s"),
+                    None => "rate limited".into(),
+                });
             }
             quota::FetchError::Network(m) => {
                 snap.health = stale;
@@ -315,10 +329,15 @@ impl Daemon {
 
     fn wait_seconds(&self) -> u64 {
         let base = self.cfg.poll_seconds.max(MIN_POLL_SECONDS);
-        match self.failures {
+        let backoff = match self.failures {
             0 => base,
             n => backoff_seconds(n - 1, base),
-        }
+        };
+        // A 429 is the server naming its own interval; the exponential
+        // backoff is only a guess at one. The longer of the two wins, so we
+        // never crowd an endpoint that asked for room, and never cut a
+        // backoff short either.
+        backoff.max(self.retry_after.unwrap_or(0))
     }
 
     fn creds_mtime(&self) -> Option<std::time::SystemTime> {
@@ -425,6 +444,7 @@ fn main() {
         cfg,
         last_quota,
         last_ok,
+        retry_after: None,
         notes: diag::Notes::default(),
         failures: 0,
     };
@@ -513,6 +533,7 @@ mod tests {
             notifier: None,
             last_quota,
             last_ok: None,
+            retry_after: None,
             notes: diag::Notes::default(),
             failures: 0,
         }
@@ -916,6 +937,75 @@ mod tests {
         // The next morning the same file is still the newest transcript on
         // disk, and it is still not a session anybody is in.
         assert!(d.cycle(datetime!(2026-09-16 09:00 UTC)).0.session.is_none());
+
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn a_rate_limit_waits_as_long_as_the_server_asked() {
+        let dir = scratch("retry-after");
+        let mut d = offline_daemon(&dir, None);
+        let mut snap = Snapshot::default();
+
+        // One failure alone would mean a 60-second backoff. The server said
+        // five minutes, and it is the one that knows.
+        d.note_failure(
+            &mut snap,
+            quota::FetchError::RateLimited {
+                retry_after: Some(300),
+            },
+            NOW,
+        );
+        assert_eq!(d.wait_seconds(), 300);
+        // A rate limit is not an authentication problem; the last reading
+        // stays on screen with its age attached.
+        assert!(matches!(snap.health, Health::Stale { .. }));
+
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn a_short_retry_after_never_shortens_a_long_backoff() {
+        let dir = scratch("retry-floor");
+        let mut d = offline_daemon(&dir, None);
+        let mut snap = Snapshot::default();
+
+        // Twelve straight failures put the backoff at its cap. A server
+        // asking for 30 seconds must not undo that: we are already the
+        // reason it is saying no.
+        for _ in 0..12 {
+            d.note_failure(
+                &mut snap,
+                quota::FetchError::RateLimited {
+                    retry_after: Some(30),
+                },
+                NOW,
+            );
+        }
+        assert_eq!(d.wait_seconds(), BACKOFF_CAP_SECONDS);
+
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn the_servers_interval_does_not_outlive_the_rate_limit() {
+        let dir = scratch("retry-clear");
+        let mut d = offline_daemon(&dir, None);
+        let mut snap = Snapshot::default();
+
+        d.note_failure(
+            &mut snap,
+            quota::FetchError::RateLimited {
+                retry_after: Some(600),
+            },
+            NOW,
+        );
+        assert_eq!(d.wait_seconds(), 600);
+
+        // The next failure is an ordinary one. A stale 600 would keep pacing
+        // the loop long after the 429 that justified it.
+        d.note_failure(&mut snap, quota::FetchError::Network("down".into()), NOW);
+        assert_eq!(d.wait_seconds(), 120);
 
         std::fs::remove_dir_all(dir).ok();
     }

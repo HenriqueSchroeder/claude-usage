@@ -141,16 +141,38 @@ pub const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
 pub const OAUTH_BETA: &str = "oauth-2025-04-20";
 pub const USER_AGENT: &str = concat!("claude-usage/", env!("CARGO_PKG_VERSION"));
 
+/// A `Retry-After` longer than this is ignored in favour of the caller's own
+/// backoff. The header is server-controlled; without a ceiling a malformed or
+/// hostile value could park the daemon for days.
+const RETRY_AFTER_CAP_SECONDS: u64 = 3600;
+
 #[derive(Debug)]
 pub enum FetchError {
     Unauthorized,
+    /// The server asked us to slow down, and said for how long when it sent a
+    /// readable `Retry-After`. Distinct from `Network` because the interval to
+    /// wait is the server's to choose, not ours to guess.
+    RateLimited {
+        retry_after: Option<u64>,
+    },
     Network(String),
     Parse(String),
 }
 
-fn map_status(code: u16, body: String) -> FetchError {
+/// Seconds from a `Retry-After` header.
+///
+/// The header also permits an HTTP date. This endpoint sends seconds, and a
+/// form we cannot read falls back to the caller's own backoff — exactly the
+/// behaviour that existed before the header was read at all.
+fn parse_retry_after(h: Option<&str>) -> Option<u64> {
+    let secs: u64 = h?.trim().parse().ok()?;
+    Some(secs.min(RETRY_AFTER_CAP_SECONDS))
+}
+
+fn map_status(code: u16, retry_after: Option<u64>, body: String) -> FetchError {
     match code {
         401 | 403 => FetchError::Unauthorized,
+        429 => FetchError::RateLimited { retry_after },
         _ => FetchError::Network(format!("HTTP {code}: {body}")),
     }
 }
@@ -169,7 +191,13 @@ pub fn fetch(agent: &ureq::Agent, token: &str) -> Result<ParsedUsage, FetchError
             .into_string()
             .map_err(|e| FetchError::Network(e.to_string()))?,
         Err(ureq::Error::Status(code, r)) => {
-            return Err(map_status(code, r.into_string().unwrap_or_default()))
+            // The header has to come off before `into_string` consumes `r`.
+            let retry_after = parse_retry_after(r.header("retry-after"));
+            return Err(map_status(
+                code,
+                retry_after,
+                r.into_string().unwrap_or_default(),
+            ));
         }
         Err(e) => return Err(FetchError::Network(e.to_string())),
     };
@@ -382,7 +410,7 @@ mod tests {
     #[test]
     fn http_401_maps_to_unauthorized() {
         assert!(matches!(
-            map_status(401, String::new()),
+            map_status(401, None, String::new()),
             FetchError::Unauthorized
         ));
     }
@@ -390,8 +418,51 @@ mod tests {
     #[test]
     fn other_http_errors_map_to_network() {
         assert!(matches!(
-            map_status(503, "down".into()),
+            map_status(503, None, "down".into()),
             FetchError::Network(_)
         ));
+    }
+
+    #[test]
+    fn http_429_carries_the_interval_the_server_asked_for() {
+        assert!(matches!(
+            map_status(429, Some(120), String::new()),
+            FetchError::RateLimited {
+                retry_after: Some(120)
+            }
+        ));
+    }
+
+    #[test]
+    fn a_429_without_a_readable_interval_is_still_a_rate_limit() {
+        // The caller falls back to its own backoff; what it must not do is
+        // treat this as an ordinary network blip and keep the old pacing.
+        assert!(matches!(
+            map_status(429, None, String::new()),
+            FetchError::RateLimited { retry_after: None }
+        ));
+    }
+
+    #[test]
+    fn retry_after_reads_seconds_and_refuses_everything_else() {
+        assert_eq!(parse_retry_after(Some("120")), Some(120));
+        assert_eq!(parse_retry_after(Some("  120 ")), Some(120));
+        assert_eq!(parse_retry_after(None), None);
+        // The HTTP-date form is legal but unused by this endpoint; unreadable
+        // is the correct answer, not a guess.
+        assert_eq!(
+            parse_retry_after(Some("Wed, 21 Oct 2026 07:28:00 GMT")),
+            None
+        );
+        assert_eq!(parse_retry_after(Some("")), None);
+        assert_eq!(parse_retry_after(Some("-5")), None);
+    }
+
+    #[test]
+    fn a_hostile_retry_after_cannot_park_the_daemon_for_days() {
+        assert_eq!(
+            parse_retry_after(Some("999999")),
+            Some(RETRY_AFTER_CAP_SECONDS)
+        );
     }
 }
