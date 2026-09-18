@@ -164,9 +164,16 @@ pub enum FetchError {
 /// The header also permits an HTTP date. This endpoint sends seconds, and a
 /// form we cannot read falls back to the caller's own backoff — exactly the
 /// behaviour that existed before the header was read at all.
+///
+/// Zero is treated as no interval at all. This endpoint answers a 429 with
+/// `Retry-After: 0`, observed in production, and retrying immediately is the
+/// one thing a rate limit is asking us not to do. `wait_seconds` already
+/// floors at the backoff, so a zero was harmless there — but it reached the
+/// diagnostics as "the server asked for 0s", which is a sentence that means
+/// nothing.
 fn parse_retry_after(h: Option<&str>) -> Option<u64> {
     let secs: u64 = h?.trim().parse().ok()?;
-    Some(secs.min(RETRY_AFTER_CAP_SECONDS))
+    (secs > 0).then(|| secs.min(RETRY_AFTER_CAP_SECONDS))
 }
 
 fn map_status(code: u16, retry_after: Option<u64>, body: String) -> FetchError {
@@ -456,6 +463,8 @@ mod tests {
         );
         assert_eq!(parse_retry_after(Some("")), None);
         assert_eq!(parse_retry_after(Some("-5")), None);
+        // What this endpoint actually sends with a 429.
+        assert_eq!(parse_retry_after(Some("0")), None);
     }
 
     #[test]
