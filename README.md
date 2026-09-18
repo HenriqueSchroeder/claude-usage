@@ -22,8 +22,10 @@ rows when the endpoint reports them), and — only while a session is
 actually running — the active Claude Code project, how long it has been
 going, its token counts and a theoretical cost estimate. When nothing has
 happened for half an hour the session block disappears rather than
-presenting yesterday's work as today's. Desktop notifications fire when a
-configured usage threshold is crossed or a quota window resets.
+presenting yesterday's work as today's. `Atualizar agora` forces a reading
+without waiting for the next interval, which matters when the endpoint has
+asked for a long backoff. Desktop notifications fire when a configured
+usage threshold is crossed or a quota window resets.
 
 A screenshot is pending — this was built and verified headlessly (over
 D-Bus introspection) and nobody has looked at the actual panel yet.

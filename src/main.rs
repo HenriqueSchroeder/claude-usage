@@ -15,6 +15,7 @@ mod tray;
 use ksni::blocking::TrayMethods;
 use state::{Health, Snapshot};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use time::OffsetDateTime;
 
@@ -67,6 +68,8 @@ struct Daemon {
     last_ok: Option<OffsetDateTime>,
     /// Seconds the server asked us to wait, from the last `Retry-After`.
     retry_after: Option<u64>,
+    /// Shared with the tray, so `Atualizar agora` can cut a wait short.
+    wakeup: Arc<tray::Wakeup>,
     notes: diag::Notes,
     failures: u32,
 }
@@ -357,21 +360,31 @@ impl Daemon {
     /// underflowing, and the next poll simply lands late by the difference —
     /// a documented cost, not a panic.
     ///
+    /// Every sleep here is interruptible by `Atualizar agora`; the menu is
+    /// only ever clicked while this function is the one running.
+    ///
     /// While healthy this is a plain sleep. While backing off it also watches
     /// the credentials file: Claude Code rewrites it when the user
     /// re-authenticates, and making them sit out a 15-minute backoff after
     /// they have already fixed the problem is its own kind of broken.
+    ///
+    /// A manual refresh deliberately leaves `failures` alone. It gets its
+    /// poll immediately, and if that poll also fails the backoff carries on
+    /// from where it was — clicking cannot be turned into a way to hammer an
+    /// endpoint that is already saying no.
     fn wait(&mut self, pulse_debt: u64) {
         let seconds = self.wait_seconds().saturating_sub(pulse_debt);
         if self.failures == 0 {
-            std::thread::sleep(Duration::from_secs(seconds));
+            self.wakeup.wait(Duration::from_secs(seconds));
             return;
         }
 
         let before = self.creds_mtime();
         let deadline = Instant::now() + Duration::from_secs(seconds);
         while let Some(left) = deadline.checked_duration_since(Instant::now()) {
-            std::thread::sleep(CREDS_CHECK_INTERVAL.min(left));
+            if self.wakeup.wait(CREDS_CHECK_INTERVAL.min(left)) {
+                return;
+            }
             if self.creds_mtime() != before {
                 return;
             }
@@ -430,6 +443,7 @@ fn main() {
     // rather than a blank bar. `health` still reports the age, so nothing
     // here passes a cached number off as a current one.
     let (last_quota, last_ok) = persist::load(&cache_path, now).unzip();
+    let wakeup = Arc::new(tray::Wakeup::default());
 
     let mut daemon = Daemon {
         agent: ureq::AgentBuilder::new().timeout(HTTP_TIMEOUT).build(),
@@ -445,6 +459,7 @@ fn main() {
         last_quota,
         last_ok,
         retry_after: None,
+        wakeup: Arc::clone(&wakeup),
         notes: diag::Notes::default(),
         failures: 0,
     };
@@ -454,7 +469,7 @@ fn main() {
     // detector is silent on its first diff), so there is nothing to animate.
     let (snap, bar, _events) = daemon.cycle(now);
 
-    let handle = match tray::Indicator::new(bar, snap)
+    let handle = match tray::Indicator::new(bar, snap, wakeup)
         .assume_sni_available(true)
         .spawn()
     {
@@ -534,6 +549,7 @@ mod tests {
             last_quota,
             last_ok: None,
             retry_after: None,
+            wakeup: Arc::new(tray::Wakeup::default()),
             notes: diag::Notes::default(),
             failures: 0,
         }
@@ -878,8 +894,11 @@ mod tests {
 
     impl FramePusher for FakeSink {
         fn push(&self, f: impl FnOnce(&mut tray::Indicator)) -> bool {
-            let mut i =
-                tray::Indicator::new(bar_with_effect(render::Effect::None), Snapshot::default());
+            let mut i = tray::Indicator::new(
+                bar_with_effect(render::Effect::None),
+                Snapshot::default(),
+                Arc::default(),
+            );
             f(&mut i);
             let n = self.calls.borrow().len();
             self.calls.borrow_mut().push(i.pulse);
@@ -1056,6 +1075,31 @@ mod tests {
         // "⚠ sem dados" however recently the daemon had known better.
         snap.health = Health::Stale { seconds: 240 };
         assert!(render::render(&d.cfg.bar, &snap, NOW).text.contains("47"));
+
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn a_manual_refresh_cuts_the_wait_short_without_resetting_the_backoff() {
+        let dir = scratch("manual");
+        let mut d = offline_daemon(&dir, None);
+        let mut snap = Snapshot::default();
+
+        // Deep into a backoff: fifteen minutes until the loop would poll on
+        // its own, which is the whole reason the menu item exists.
+        for _ in 0..12 {
+            d.note_failure(&mut snap, quota::FetchError::Network("down".into()), NOW);
+        }
+        assert_eq!(d.wait_seconds(), BACKOFF_CAP_SECONDS);
+
+        d.wakeup.request();
+        let t = Instant::now();
+        d.wait(0);
+        assert!(t.elapsed() < Duration::from_secs(5), "{:?}", t.elapsed());
+
+        // The backoff itself is untouched. One click is one poll, not a
+        // licence to hammer an endpoint that is already refusing.
+        assert_eq!(d.wait_seconds(), BACKOFF_CAP_SECONDS);
 
         std::fs::remove_dir_all(dir).ok();
     }

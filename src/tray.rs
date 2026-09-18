@@ -4,7 +4,54 @@ use crate::render::{human_duration, BarOutput, Effect, NO_VALUE};
 use crate::state::{Health, Snapshot};
 use ksni::{menu::StandardItem, Icon, MenuItem, OfflineReason, Status, Tray};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::{Duration, Instant};
 use time::OffsetDateTime;
+
+/// Lets the menu wake the poll loop.
+///
+/// The loop spends almost all of its life asleep, and a backoff now runs as
+/// long as an hour when the server asks for it. Without this the only way to
+/// force a reading is to restart the service.
+///
+/// `Condvar` rather than a flag polled on a timer: the point of this daemon
+/// is to cost nothing while idle, and waking once a second to ask whether
+/// anyone clicked would trade a permanent cost for a latency nobody notices.
+///
+/// The locks are unwrapped because the crate builds with `panic = "abort"`,
+/// so a poisoned mutex cannot exist — a panic takes the process with it.
+#[derive(Default)]
+pub struct Wakeup {
+    requested: Mutex<bool>,
+    ready: Condvar,
+}
+
+impl Wakeup {
+    pub fn request(&self) {
+        *self.requested.lock().unwrap() = true;
+        self.ready.notify_all();
+    }
+
+    /// Sleeps up to `timeout`, returning `true` if a refresh was asked for
+    /// instead of the time simply running out.
+    ///
+    /// The request is consumed on the way out, so one click buys one poll;
+    /// the loop does not come back round and immediately skip its next wait.
+    pub fn wait(&self, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        let mut requested = self.requested.lock().unwrap();
+        // A loop, not a bare `wait_timeout`: a condvar may wake spuriously,
+        // which would otherwise cut the poll interval short at random.
+        while !*requested {
+            let Some(left) = deadline.checked_duration_since(Instant::now()) else {
+                return false;
+            };
+            requested = self.ready.wait_timeout(requested, left).unwrap().0;
+        }
+        *requested = false;
+        true
+    }
+}
 
 /// The panel item.
 ///
@@ -26,15 +73,19 @@ pub struct Indicator {
     /// hands `watcher_offline` a `&self`, and the alternative to an atomic
     /// here is one identical line in the journal per reconnection attempt.
     offline_reported: AtomicBool,
+    /// Shared with the poll loop, which is asleep whenever a menu item can
+    /// be clicked.
+    wakeup: Arc<Wakeup>,
 }
 
 impl Indicator {
-    pub fn new(bar: BarOutput, snap: Snapshot) -> Self {
+    pub fn new(bar: BarOutput, snap: Snapshot, wakeup: Arc<Wakeup>) -> Self {
         Indicator {
             bar,
             snap,
             pulse: None,
             offline_reported: AtomicBool::new(false),
+            wakeup,
         }
     }
 }
@@ -238,6 +289,14 @@ impl Tray for Indicator {
         items.push(MenuItem::Separator);
         items.push(
             StandardItem {
+                label: "Atualizar agora".into(),
+                activate: Box::new(|t: &mut Indicator| t.wakeup.request()),
+                ..Default::default()
+            }
+            .into(),
+        );
+        items.push(
+            StandardItem {
                 label: "Sair".into(),
                 activate: Box::new(|_| std::process::exit(0)),
                 ..Default::default()
@@ -261,6 +320,7 @@ mod tests {
                 effect: Effect::None,
             },
             Snapshot::default(),
+            Arc::default(),
         )
     }
 
@@ -400,5 +460,59 @@ mod tests {
         assert!(labels(&t)
             .iter()
             .any(|l| l == "Custo est.     US$ 3.42  (teórico)"));
+    }
+
+    #[test]
+    fn a_wait_that_nobody_interrupts_runs_out() {
+        let w = Wakeup::default();
+        let t = Instant::now();
+        assert!(!w.wait(Duration::from_millis(50)));
+        assert!(t.elapsed() >= Duration::from_millis(50));
+    }
+
+    #[test]
+    fn one_click_buys_exactly_one_poll() {
+        let w = Wakeup::default();
+        w.request();
+        // The click cuts this wait short...
+        assert!(w.wait(Duration::from_secs(30)));
+        // ...and is spent doing it. A request that survived would collapse
+        // every interval after it, turning one click into a poll loop with
+        // no delay at all.
+        assert!(!w.wait(Duration::from_millis(50)));
+    }
+
+    #[test]
+    fn a_click_from_another_thread_cuts_a_long_wait_short() {
+        let w = Arc::new(Wakeup::default());
+        let clicker = Arc::clone(&w);
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(30));
+            clicker.request();
+        });
+
+        // ksni runs the menu on its own thread, so this is the real shape of
+        // a click: the loop is already blocked when it arrives.
+        let t = Instant::now();
+        assert!(w.wait(Duration::from_secs(30)));
+        assert!(t.elapsed() < Duration::from_secs(5), "{:?}", t.elapsed());
+    }
+
+    #[test]
+    fn the_menu_offers_a_manual_refresh_that_wakes_the_loop() {
+        let mut i = indicator();
+        let wakeup = Arc::clone(&i.wakeup);
+
+        let activate = i
+            .menu()
+            .into_iter()
+            .find_map(|m| match m {
+                MenuItem::Standard(s) if s.label == "Atualizar agora" => Some(s.activate),
+                _ => None,
+            })
+            .expect("the menu offers a manual refresh");
+        activate(&mut i);
+
+        assert!(wakeup.wait(Duration::from_millis(0)));
     }
 }
