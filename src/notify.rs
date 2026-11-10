@@ -46,6 +46,7 @@ pub fn message_for(event: &Event) -> (String, String, bool) {
 pub struct Notifier {
     conn: Connection,
     last_id: u32,
+    last_critical: bool,
 }
 
 impl Notifier {
@@ -53,11 +54,16 @@ impl Notifier {
         Some(Notifier {
             conn: Connection::session().ok()?,
             last_id: 0,
+            last_critical: false,
         })
     }
 
-    /// Replaces the previous notification instead of stacking banners.
+    /// Replaces the previous notification instead of stacking banners —
+    /// unless that one was critical. A critical banner stays up until
+    /// dismissed, and a later routine one taking its place would turn
+    /// "weekly at 95%" into a five-second toast about the session.
     pub fn send(&mut self, summary: &str, body: &str, critical: bool) {
+        let replaces = if self.last_critical { 0 } else { self.last_id };
         let mut hints: HashMap<&str, Value> = HashMap::new();
         hints.insert("urgency", Value::U8(if critical { 2 } else { 1 }));
 
@@ -68,7 +74,7 @@ impl Notifier {
             "Notify",
             &(
                 "claude-usage",
-                self.last_id,
+                replaces,
                 "utilities-system-monitor-symbolic",
                 summary,
                 body,
@@ -81,6 +87,7 @@ impl Notifier {
         if let Ok(r) = reply {
             if let Ok(id) = r.body().deserialize::<u32>() {
                 self.last_id = id;
+                self.last_critical = critical;
             }
         }
     }
