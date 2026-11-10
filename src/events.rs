@@ -113,9 +113,17 @@ impl Detector {
             let (pct, resets_at) = match (metric, snap.quota.as_ref()) {
                 (_, None) => continue,
                 // No five-hour window: nothing to cross and nothing to reset.
+                // What the last window left behind is forgotten, so the next
+                // one is a first sighting rather than an "advance" that would
+                // announce a reset hours late, at the first prompt of the
+                // next session.
                 (Metric::Session, Some(q)) => match &q.session {
                     Some(w) => (w.percent, w.resets_at),
-                    None => continue,
+                    None => {
+                        self.state.last_session_reset = None;
+                        self.state.armed_session.clear();
+                        continue;
+                    }
                 },
                 (Metric::Weekly, Some(q)) => (q.weekly.percent, q.weekly.resets_at),
             };
@@ -301,6 +309,36 @@ mod tests {
             Some(datetime!(2026-09-16 12:00:01 UTC));
         assert!(d
             .diff(&real_reset)
+            .iter()
+            .any(|e| matches!(e, Event::WindowReset { .. })));
+    }
+
+    #[test]
+    fn a_session_after_an_idle_gap_is_not_announced_as_a_reset() {
+        let mut d = Detector::new(cfg());
+        let mut before = snap_session(40.0);
+        before
+            .quota
+            .as_mut()
+            .unwrap()
+            .session
+            .get_or_insert_default()
+            .resets_at = Some(datetime!(2026-09-16 07:00 UTC));
+        d.diff(&before);
+
+        let mut idle = snap_session(0.0);
+        idle.quota.as_mut().unwrap().session = None;
+        assert!(d.diff(&idle).is_empty());
+
+        let mut next = snap_session(2.0);
+        next.quota
+            .as_mut()
+            .unwrap()
+            .session
+            .get_or_insert_default()
+            .resets_at = Some(datetime!(2026-09-16 15:00 UTC));
+        assert!(!d
+            .diff(&next)
             .iter()
             .any(|e| matches!(e, Event::WindowReset { .. })));
     }
