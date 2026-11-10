@@ -41,7 +41,7 @@ pub fn parse_color(s: &str) -> Option<Rgb> {
 
 fn metric_value(snap: &Snapshot, metric: &str) -> Option<f32> {
     match metric {
-        "session" => Some(snap.session_pct()),
+        "session" => snap.session_pct(),
         "weekly" => Some(snap.weekly_pct()),
         // An unknown cost matches no rule: a threshold on a number we do not
         // have is not crossed, it is unanswerable.
@@ -103,7 +103,17 @@ fn expand(template: &str, snap: &Snapshot, now: OffsetDateTime) -> String {
         };
         let key = &rest[start + 1..end];
         let value = match key {
-            "session" => Some(format!("{:.0}", snap.session_pct())),
+            "session" => Some(
+                snap.session_pct()
+                    .map_or_else(|| NO_VALUE.into(), |s| format!("{s:.0}")),
+            ),
+            // Both windows when there are two, the weekly one alone when the
+            // plan has no five-hour window or none is running. A template
+            // can't branch, and "—% · 35%" reads as a broken bar.
+            "auto" => Some(match snap.session_pct() {
+                Some(s) => format!("{s:.0}% · {:.0}%", snap.weekly_pct()),
+                None => format!("{:.0}%", snap.weekly_pct()),
+            }),
             "weekly" => Some(format!("{:.0}", snap.weekly_pct())),
             // {reset} is the nearest of the two windows, which is almost
             // always the 5-hour one. The two named placeholders exist so a
@@ -197,9 +207,9 @@ mod tests {
 
     fn snap(session: f32, weekly: f32) -> Snapshot {
         let mut q = Quota::default();
-        q.session.percent = session;
+        q.session.get_or_insert_default().percent = session;
         q.weekly.percent = weekly;
-        q.session.resets_at = Some(datetime!(2026-09-15 15:40 UTC));
+        q.session.get_or_insert_default().resets_at = Some(datetime!(2026-09-15 15:40 UTC));
         Snapshot {
             quota: Some(q),
             ..Default::default()
@@ -223,6 +233,32 @@ mod tests {
             rules: vec![],
         };
         assert_eq!(render(&cfg, &snap(24.0, 98.0), NOW).text, "24% · 98%");
+    }
+
+    #[test]
+    fn auto_shows_both_windows_or_only_the_week() {
+        let cfg = BarConfig {
+            format: "{auto}".into(),
+            rules: vec![],
+        };
+        assert_eq!(render(&cfg, &snap(24.0, 98.0), NOW).text, "24% · 98%");
+
+        let mut no_session = snap(0.0, 35.0);
+        no_session.quota.as_mut().unwrap().session = None;
+        assert_eq!(render(&cfg, &no_session, NOW).text, "35%");
+    }
+
+    #[test]
+    fn a_missing_session_window_is_a_dash_and_matches_no_rule() {
+        let mut s = snap(0.0, 35.0);
+        s.quota.as_mut().unwrap().session = None;
+        let cfg = BarConfig {
+            format: "{session} {session_reset}".into(),
+            rules: vec![rule("session", -1.0, "#e01b24")],
+        };
+        let out = render(&cfg, &s, NOW);
+        assert_eq!(out.text, "— —");
+        assert_eq!(out.color, DEFAULT_COLOR);
     }
 
     #[test]

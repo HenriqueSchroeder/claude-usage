@@ -247,12 +247,14 @@ impl Tray for Indicator {
                 // Read at the moment the menu opens, not at the last poll:
                 // the countdown shown is the countdown as of now.
                 let now = OffsetDateTime::now_utc();
-                items.push(info(quota_line(
-                    "5h",
-                    self.snap.session_pct(),
-                    self.snap.session_reset_in(now),
-                    q.session.severity,
-                )));
+                if let (Some(w), Some(pct)) = (q.session.as_ref(), self.snap.session_pct()) {
+                    items.push(info(quota_line(
+                        "5h",
+                        pct,
+                        self.snap.session_reset_in(now),
+                        w.severity,
+                    )));
+                }
                 items.push(info(quota_line(
                     "Semanal",
                     self.snap.weekly_pct(),
@@ -410,11 +412,12 @@ mod tests {
     fn the_menu_renders_the_compact_quota_lines_end_to_end() {
         let mut t = indicator();
         let mut q = crate::quota::Quota::default();
-        q.session.percent = 2.0;
+        q.session.get_or_insert_default().percent = 2.0;
         q.weekly.percent = 26.0;
         // Session clears in ~4h51m; weekly carries no resets_at at all,
         // which must render a dash rather than a fabricated time.
-        q.session.resets_at = Some(OffsetDateTime::now_utc() + time::Duration::minutes(291));
+        q.session.get_or_insert_default().resets_at =
+            Some(OffsetDateTime::now_utc() + time::Duration::minutes(291));
         t.snap.quota = Some(q);
 
         let labels: Vec<String> = t
@@ -434,6 +437,26 @@ mod tests {
         assert!(!labels
             .iter()
             .any(|l| l.contains("reset") || l.contains("Sessão")));
+    }
+
+    #[test]
+    fn the_menu_leaves_out_a_five_hour_window_that_does_not_exist() {
+        let mut t = indicator();
+        let mut q = crate::quota::Quota::default();
+        q.weekly.percent = 35.0;
+        t.snap.quota = Some(q);
+
+        let labels: Vec<String> = t
+            .menu()
+            .iter()
+            .filter_map(|i| match i {
+                MenuItem::Standard(s) => Some(s.label.clone()),
+                _ => None,
+            })
+            .collect();
+
+        assert!(!labels.iter().any(|l| l.starts_with("5h")));
+        assert!(labels.iter().any(|l| l.starts_with("Semanal  ·  35%")));
     }
 
     #[test]

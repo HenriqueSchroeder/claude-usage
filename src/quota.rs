@@ -46,7 +46,10 @@ pub struct BreakdownRow {
 
 #[derive(Debug, Clone, Default)]
 pub struct Quota {
-    pub session: Window,
+    /// `None` when there is no five-hour window to show: none is running
+    /// right now, or the plan has no such limit at all. The endpoint answers
+    /// both the same way, and neither is a 0% reading.
+    pub session: Option<Window>,
     pub weekly: Window,
     pub breakdown: Vec<BreakdownRow>,
 }
@@ -58,9 +61,12 @@ pub struct Quota {
 /// distinction `parse_usage` needs internally to decide whether the
 /// response is recognised at all — and is not the same thing as
 /// `Some(Window { percent: 0.0, .. })`, a genuine zero reading.
+///
+/// `session` has one more state: `Some(None)` is the response positively
+/// saying there is no five-hour window, which is a reading, not a gap.
 #[derive(Debug, Default)]
 pub struct ParsedUsage {
-    pub session: Option<Window>,
+    pub session: Option<Option<Window>>,
     pub weekly: Option<Window>,
     pub breakdown: Vec<BreakdownRow>,
 }
@@ -268,14 +274,16 @@ pub fn parse_usage(bytes: &[u8]) -> Result<ParsedUsage, String> {
         );
     }
 
-    // With no five-hour window running, the endpoint sends `five_hour: null`
-    // and no `session` entry in limits[]. Next to a real weekly number that
-    // is a reading — nothing used, nothing to reset — not a dropped key: a
-    // renamed key would be absent, not present and null. Checked after the
-    // test above so an all-null response still fails.
-    if session.is_none() && matches!(raw.five_hour, Some(None)) {
-        session = Some(Window::default());
-    }
+    // With no five-hour window, whether idle or absent from the plan, the
+    // endpoint sends `five_hour: null` and no `session` entry in limits[].
+    // That is the response saying so, not a dropped key: a renamed key would
+    // be absent, not present and null. Decided after the test above so an
+    // all-null response still fails.
+    let session = match session {
+        Some(w) => Some(Some(w)),
+        None if matches!(raw.five_hour, Some(None)) => Some(None),
+        None => None,
+    };
 
     let breakdown = raw
         .seven_day_breakdown
@@ -310,7 +318,7 @@ mod tests {
     #[test]
     fn parses_the_real_response() {
         let q = parse_usage(FIXTURE).unwrap();
-        let session = q.session.unwrap().percent;
+        let session = q.session.flatten().unwrap().percent;
         let weekly = q.weekly.unwrap().percent;
         assert!((0.0..=100.0).contains(&session));
         assert!((0.0..=100.0).contains(&weekly));
@@ -327,7 +335,7 @@ mod tests {
             ]
         }"#;
         let q = parse_usage(json).unwrap();
-        assert_eq!(q.session.unwrap().percent, 33.0);
+        assert_eq!(q.session.flatten().unwrap().percent, 33.0);
         let weekly = q.weekly.unwrap();
         assert_eq!(weekly.percent, 77.0);
         assert!(matches!(weekly.severity, Severity::Critical));
@@ -337,7 +345,7 @@ mod tests {
     fn falls_back_to_top_level_windows_when_limits_absent() {
         let json = br#"{"five_hour":{"utilization":24.0},"seven_day":{"utilization":98.0}}"#;
         let q = parse_usage(json).unwrap();
-        assert_eq!(q.session.unwrap().percent, 24.0);
+        assert_eq!(q.session.flatten().unwrap().percent, 24.0);
         assert_eq!(q.weekly.unwrap().percent, 98.0);
     }
 
@@ -345,7 +353,15 @@ mod tests {
     fn unknown_keys_are_ignored() {
         let json = br#"{"five_hour":{"utilization":5.0},"nimbus_quill":{"utilization":0.0},
                         "a_key_invented_tomorrow":{"nested":[1,2,3]}}"#;
-        assert_eq!(parse_usage(json).unwrap().session.unwrap().percent, 5.0);
+        assert_eq!(
+            parse_usage(json)
+                .unwrap()
+                .session
+                .flatten()
+                .unwrap()
+                .percent,
+            5.0
+        );
     }
 
     #[test]
@@ -358,18 +374,15 @@ mod tests {
     }
 
     #[test]
-    fn a_null_session_beside_a_real_week_is_an_idle_session() {
-        // What the endpoint answers when no five-hour window is running.
-        // Treating it as a dropped window left a fresh install with no
-        // reading at all until the user happened to start a session.
+    fn a_null_session_beside_a_real_week_means_no_session_window() {
+        // What the endpoint answers when there is no five-hour window, idle
+        // or not on the plan at all. Not a dropped key, and not 0% either.
         let q = parse_usage(
             br#"{"five_hour":null,"seven_day":{"utilization":35.0},
                  "limits":[{"kind":"weekly_all","percent":35}]}"#,
         )
         .unwrap();
-        let session = q.session.expect("an idle session is a reading");
-        assert_eq!(session.percent, 0.0);
-        assert!(session.resets_at.is_none());
+        assert!(matches!(q.session, Some(None)));
         assert_eq!(q.weekly.unwrap().percent, 35.0);
     }
 
@@ -395,7 +408,7 @@ mod tests {
         // 0" — filling it with a default here would be the original bug
         // verbatim, just moved from the caller into this function.
         let q = parse_usage(br#"{"five_hour":{"utilization":42.0}}"#).unwrap();
-        assert_eq!(q.session.unwrap().percent, 42.0);
+        assert_eq!(q.session.flatten().unwrap().percent, 42.0);
         assert!(q.weekly.is_none(), "seven_day was never in the response");
 
         let q = parse_usage(br#"{"limits":[{"kind":"weekly_all","percent":8}]}"#).unwrap();
@@ -410,7 +423,7 @@ mod tests {
         // not treated as absent just because the number is falsy.
         let json = br#"{"five_hour":{"utilization":0.0},"seven_day":{"utilization":50.0}}"#;
         let q = parse_usage(json).unwrap();
-        assert_eq!(q.session.unwrap().percent, 0.0);
+        assert_eq!(q.session.flatten().unwrap().percent, 0.0);
         assert_eq!(q.weekly.unwrap().percent, 50.0);
     }
 
@@ -440,7 +453,7 @@ mod tests {
         let json = br#"{"five_hour":{"utilization":37.0},
                         "limits":[{"kind":"session","severity":"critical"}]}"#;
         let q = parse_usage(json).unwrap();
-        assert_eq!(q.session.unwrap().percent, 37.0);
+        assert_eq!(q.session.flatten().unwrap().percent, 37.0);
     }
 
     #[test]

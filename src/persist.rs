@@ -27,7 +27,9 @@ const MAX_AGE_SECONDS: i64 = 7 * 24 * 3600;
 #[derive(Serialize, Deserialize)]
 struct Stored {
     fetched_at: i64,
-    session: StoredWindow,
+    /// `null` when there was no five-hour window to store.
+    #[serde(default)]
+    session: Option<StoredWindow>,
     weekly: StoredWindow,
     #[serde(default)]
     breakdown: Vec<StoredRow>,
@@ -98,7 +100,7 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 pub fn save(path: &Path, quota: &Quota, fetched_at: OffsetDateTime) {
     let stored = Stored {
         fetched_at: fetched_at.unix_timestamp(),
-        session: (&quota.session).into(),
+        session: quota.session.as_ref().map(Into::into),
         weekly: (&quota.weekly).into(),
         breakdown: quota
             .breakdown
@@ -132,7 +134,7 @@ pub fn load(path: &Path, now: OffsetDateTime) -> Option<(Quota, OffsetDateTime)>
     }
 
     let quota = Quota {
-        session: (&stored.session).into(),
+        session: stored.session.as_ref().map(Into::into),
         weekly: (&stored.weekly).into(),
         breakdown: stored
             .breakdown
@@ -165,11 +167,11 @@ mod tests {
 
     fn sample() -> Quota {
         Quota {
-            session: Window {
+            session: Some(Window {
                 percent: 42.5,
                 resets_at: Some(datetime!(2026-09-18 15:30 UTC)),
                 severity: Severity::Warning,
-            },
+            }),
             weekly: Window {
                 percent: 83.0,
                 resets_at: Some(datetime!(2026-09-22 07:00 UTC)),
@@ -192,16 +194,36 @@ mod tests {
         let (q, at) = load(&path, NOW).expect("just written");
 
         assert_eq!(at, taken);
-        assert_eq!(q.session.percent, 42.5);
+        let session = q.session.as_ref().expect("the session window survives");
+        assert_eq!(session.percent, 42.5);
         assert_eq!(q.weekly.percent, 83.0);
-        assert_eq!(q.session.resets_at, Some(datetime!(2026-09-18 15:30 UTC)));
+        assert_eq!(session.resets_at, Some(datetime!(2026-09-18 15:30 UTC)));
         assert_eq!(q.weekly.resets_at, Some(datetime!(2026-09-22 07:00 UTC)));
         // Severity drives the icon colour; a reading that came back Normal
         // would quietly turn a red ring green across a restart.
-        assert_eq!(q.session.severity, Severity::Warning);
+        assert_eq!(session.severity, Severity::Warning);
         assert_eq!(q.weekly.severity, Severity::Critical);
         assert_eq!(q.breakdown.len(), 1);
         assert_eq!(q.breakdown[0].display_name, "Claude Code");
+
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn no_session_window_stays_none_across_a_restart() {
+        // Coming back as a 0% window would put a session number on the bar
+        // of a plan that has no such limit.
+        let dir = scratch("no-session");
+        let path = dir.join("quota.json");
+        let q = Quota {
+            session: None,
+            ..sample()
+        };
+
+        save(&path, &q, NOW);
+        let (back, _) = load(&path, NOW).expect("just written");
+        assert!(back.session.is_none());
+        assert_eq!(back.weekly.percent, 83.0);
 
         std::fs::remove_dir_all(dir).ok();
     }

@@ -28,8 +28,10 @@ pub struct Snapshot {
 }
 
 impl Snapshot {
-    pub fn session_pct(&self) -> f32 {
-        self.quota.as_ref().map_or(0.0, |q| q.session.percent)
+    /// `None` when there is no five-hour window to show, which callers must
+    /// leave out rather than draw as 0%.
+    pub fn session_pct(&self) -> Option<f32> {
+        Some(self.quota.as_ref()?.session.as_ref()?.percent)
     }
 
     pub fn weekly_pct(&self) -> f32 {
@@ -38,7 +40,7 @@ impl Snapshot {
 
     /// Time until the 5-hour window clears, if the endpoint said when.
     pub fn session_reset_in(&self, now: OffsetDateTime) -> Option<Duration> {
-        until(self.quota.as_ref()?.session.resets_at, now)
+        until(self.quota.as_ref()?.session.as_ref()?.resets_at, now)
     }
 
     /// Time until the 7-day window clears, if the endpoint said when.
@@ -72,7 +74,7 @@ mod tests {
     #[test]
     fn empty_snapshot_reports_zero_not_panic() {
         let s = Snapshot::default();
-        assert_eq!(s.session_pct(), 0.0);
+        assert_eq!(s.session_pct(), None);
         assert_eq!(s.weekly_pct(), 0.0);
         assert!(s.reset_in(datetime!(2026-09-15 14:00 UTC)).is_none());
     }
@@ -80,7 +82,7 @@ mod tests {
     #[test]
     fn reset_in_uses_the_nearest_upcoming_window() {
         let mut q = crate::quota::Quota::default();
-        q.session.resets_at = Some(datetime!(2026-09-15 15:40 UTC));
+        q.session.get_or_insert_default().resets_at = Some(datetime!(2026-09-15 15:40 UTC));
         q.weekly.resets_at = Some(datetime!(2026-09-16 07:00 UTC));
         let s = Snapshot {
             quota: Some(q),
@@ -93,7 +95,7 @@ mod tests {
     #[test]
     fn each_window_reports_its_own_reset() {
         let mut q = crate::quota::Quota::default();
-        q.session.resets_at = Some(datetime!(2026-09-15 15:40 UTC));
+        q.session.get_or_insert_default().resets_at = Some(datetime!(2026-09-15 15:40 UTC));
         q.weekly.resets_at = Some(datetime!(2026-09-19 07:00 UTC));
         let s = Snapshot {
             quota: Some(q),
@@ -112,7 +114,7 @@ mod tests {
     #[test]
     fn a_window_with_no_reset_time_reports_none_not_the_other_window() {
         let mut q = crate::quota::Quota::default();
-        q.session.resets_at = Some(datetime!(2026-09-15 15:40 UTC));
+        q.session.get_or_insert_default().resets_at = Some(datetime!(2026-09-15 15:40 UTC));
         let s = Snapshot {
             quota: Some(q),
             ..Default::default()
@@ -123,7 +125,7 @@ mod tests {
     #[test]
     fn already_past_reset_is_not_negative() {
         let mut q = crate::quota::Quota::default();
-        q.session.resets_at = Some(datetime!(2026-09-15 10:00 UTC));
+        q.session.get_or_insert_default().resets_at = Some(datetime!(2026-09-15 10:00 UTC));
         let s = Snapshot {
             quota: Some(q),
             ..Default::default()

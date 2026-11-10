@@ -23,7 +23,7 @@ pub struct BarConfig {
 impl Default for BarConfig {
     fn default() -> Self {
         BarConfig {
-            format: "{session}% · {weekly}%".into(),
+            format: "{auto}".into(),
             rules: Vec::new(),
         }
     }
@@ -131,7 +131,7 @@ mod tests {
     fn missing_file_yields_defaults() {
         let c = load(std::path::Path::new("/nonexistent/config.toml"));
         assert_eq!(c.poll_seconds, 60);
-        assert_eq!(c.bar.format, "{session}% · {weekly}%");
+        assert_eq!(c.bar.format, "{auto}");
         assert_eq!(c.threshold.levels, vec![75, 90, 95]);
     }
 

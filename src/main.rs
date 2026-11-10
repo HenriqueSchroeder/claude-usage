@@ -627,7 +627,7 @@ mod tests {
 
     fn quota_with(session: f32, weekly: f32) -> quota::Quota {
         let mut q = quota::Quota::default();
-        q.session.percent = session;
+        q.session.get_or_insert_default().percent = session;
         q.weekly.percent = weekly;
         q
     }
@@ -649,7 +649,7 @@ mod tests {
             .expect("a prior reading exists to merge from");
 
         // The dropped window is carried forward, not zeroed...
-        assert_eq!(merged.quota.session.percent, 92.0);
+        assert_eq!(merged.quota.session.as_ref().unwrap().percent, 92.0);
         // ...and the fresh one is used as-is.
         assert_eq!(merged.quota.weekly.percent, 55.0);
         assert_eq!(merged.carried_over, Some("five_hour"));
@@ -664,7 +664,7 @@ mod tests {
 
         let merged = d
             .merge_quota(quota::ParsedUsage {
-                session: Some(quota::Window::default()), // a real 0%
+                session: Some(Some(quota::Window::default())), // a real 0%
                 weekly: Some(quota::Window {
                     percent: 11.0,
                     ..Default::default()
@@ -675,8 +675,34 @@ mod tests {
 
         // Present-and-zero must overwrite the old 92.0, not be confused
         // with absent-and-carried-forward.
-        assert_eq!(merged.quota.session.percent, 0.0);
+        assert_eq!(merged.quota.session.as_ref().unwrap().percent, 0.0);
         assert_eq!(merged.carried_over, None);
+
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn merge_quota_takes_no_session_window_as_a_reading_not_a_gap() {
+        // `five_hour: null` is the endpoint saying there is no such window
+        // (idle, or a plan without one). Borrowing the old 92% would keep a
+        // stale session number on the bar indefinitely, and failing without
+        // a prior reading left fresh installs with nothing at all.
+        let dir = scratch("merge-nosession");
+        for prior in [Some(quota_with(92.0, 10.0)), None] {
+            let d = offline_daemon(&dir, prior);
+            let merged = d
+                .merge_quota(quota::ParsedUsage {
+                    session: Some(None),
+                    weekly: Some(quota::Window {
+                        percent: 35.0,
+                        ..Default::default()
+                    }),
+                    breakdown: vec![],
+                })
+                .expect("a complete reading needs nothing to fall back on");
+            assert!(merged.quota.session.is_none());
+            assert_eq!(merged.carried_over, None);
+        }
 
         std::fs::remove_dir_all(dir).ok();
     }
@@ -742,7 +768,8 @@ mod tests {
             })
             .expect("a prior reading exists to merge from");
         assert_eq!(
-            merged.quota.session.percent, 92.0,
+            merged.quota.session.as_ref().unwrap().percent,
+            92.0,
             "carried forward, not zeroed"
         );
         d.detector.diff(&snap_for(merged.quota));
@@ -1066,7 +1093,7 @@ mod tests {
 
         // A daemon that had a good reading four minutes before it died.
         let mut q = quota::Quota::default();
-        q.session.percent = 47.0;
+        q.session.get_or_insert_default().percent = 47.0;
         q.weekly.percent = 26.0;
         persist::save(&cache, &q, NOW - time::Duration::minutes(4));
 
@@ -1080,7 +1107,7 @@ mod tests {
 
         // The reading crossed the restart and reached the snapshot, so the
         // menu is populated on the very first cycle.
-        assert_eq!(snap.session_pct(), 47.0);
+        assert_eq!(snap.session_pct(), Some(47.0));
         assert_eq!(snap.weekly_pct(), 26.0);
         // Absent credentials are what this particular daemon has to report...
         assert_eq!(bar.text, "⚠ sem credencial");

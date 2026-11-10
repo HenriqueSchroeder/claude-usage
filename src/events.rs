@@ -112,7 +112,11 @@ impl Detector {
         for metric in [Metric::Session, Metric::Weekly] {
             let (pct, resets_at) = match (metric, snap.quota.as_ref()) {
                 (_, None) => continue,
-                (Metric::Session, Some(q)) => (q.session.percent, q.session.resets_at),
+                // No five-hour window: nothing to cross and nothing to reset.
+                (Metric::Session, Some(q)) => match &q.session {
+                    Some(w) => (w.percent, w.resets_at),
+                    None => continue,
+                },
                 (Metric::Weekly, Some(q)) => (q.weekly.percent, q.weekly.resets_at),
             };
 
@@ -195,8 +199,8 @@ mod tests {
 
     fn snap_session(session: f32) -> Snapshot {
         let mut q = Quota::default();
-        q.session.percent = session;
-        q.session.resets_at = Some(datetime!(2026-09-16 07:00 UTC));
+        q.session.get_or_insert_default().percent = session;
+        q.session.get_or_insert_default().resets_at = Some(datetime!(2026-09-16 07:00 UTC));
         Snapshot {
             quota: Some(q),
             ..Default::default()
@@ -305,20 +309,35 @@ mod tests {
     fn a_one_second_jitter_is_not_a_window_reset_session() {
         let mut d = Detector::new(cfg());
         let mut base = snap_session(50.0);
-        base.quota.as_mut().unwrap().session.resets_at = Some(datetime!(2026-09-16 07:00:00 UTC));
+        base.quota
+            .as_mut()
+            .unwrap()
+            .session
+            .get_or_insert_default()
+            .resets_at = Some(datetime!(2026-09-16 07:00:00 UTC));
         d.diff(&base);
 
         let mut jittered = snap_session(51.0);
-        jittered.quota.as_mut().unwrap().session.resets_at =
-            Some(datetime!(2026-09-16 07:00:01 UTC));
+        jittered
+            .quota
+            .as_mut()
+            .unwrap()
+            .session
+            .get_or_insert_default()
+            .resets_at = Some(datetime!(2026-09-16 07:00:01 UTC));
         assert!(!d
             .diff(&jittered)
             .iter()
             .any(|e| matches!(e, Event::WindowReset { .. })));
 
         let mut real_reset = snap_session(3.0);
-        real_reset.quota.as_mut().unwrap().session.resets_at =
-            Some(datetime!(2026-09-16 12:00:01 UTC));
+        real_reset
+            .quota
+            .as_mut()
+            .unwrap()
+            .session
+            .get_or_insert_default()
+            .resets_at = Some(datetime!(2026-09-16 12:00:01 UTC));
         assert!(d
             .diff(&real_reset)
             .iter()
