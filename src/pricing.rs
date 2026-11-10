@@ -22,31 +22,58 @@ impl Tokens {
     }
 }
 
-/// Price per million tokens: (input, output).
-/// Cache read is input/10; cache creation is input * 1.25.
-/// WARNING: Matching is by prefix (model.starts_with(id)). No id may be a
-/// prefix of another: if violated, a shorter entry silently shadows the
-/// longer one and returns the wrong price with no error.
-const PRICES: &[(&str, f64, f64)] = &[
-    ("claude-opus-5", 15.0, 75.0),
-    ("claude-fable-5-1", 15.0, 75.0),
-    ("claude-sonnet-5", 3.0, 15.0),
-    ("claude-haiku-4-5", 1.0, 5.0),
-];
-
-fn prices_for(model: &str) -> Option<(f64, f64)> {
-    PRICES
-        .iter()
-        .find(|(id, _, _)| model.starts_with(id))
-        .map(|(_, i, o)| (*i, *o))
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Price {
+    input: f64,
+    output: f64,
+    /// Cache reads as a fraction of input. No longer 0.1 everywhere: the 5.x
+    /// generation discounts them further.
+    cache_read: f64,
 }
 
-fn cost_of((pin, pout): (f64, f64), t: &Tokens) -> f64 {
+const fn p(input: f64, output: f64, cache_read: f64) -> Price {
+    Price {
+        input,
+        output,
+        cache_read,
+    }
+}
+
+/// List price per million tokens. Cache creation is input * 1.25 (the
+/// 5-minute TTL write) on every model.
+///
+/// Matched by the longest id the model starts with, so `claude-opus-5` keeps
+/// answering for dated `claude-opus-5-2026...` ids while `claude-opus-5-5`
+/// gets its own row.
+const PRICES: &[(&str, Price)] = &[
+    ("claude-fable-5-2", p(8.0, 40.0, 0.025)),
+    ("claude-fable-5-1", p(10.0, 50.0, 0.025)),
+    ("claude-fable-5", p(10.0, 50.0, 0.1)),
+    ("claude-opus-5-5", p(4.0, 20.0, 0.05)),
+    ("claude-opus-5", p(5.0, 25.0, 0.1)),
+    ("claude-sonnet-5-5", p(2.0, 10.0, 0.05)),
+    ("claude-sonnet-5", p(2.0, 10.0, 0.1)),
+    // ponytail: Haiku 5.5 bills $0.50/$2.50 for prompts over 100K tokens;
+    // per-model totals can't tell which requests crossed it, so long-prompt
+    // Haiku runs are underestimated. Track per-request input size if it matters.
+    ("claude-haiku-5-5", p(0.10, 0.50, 0.1)),
+    ("claude-haiku-4-5", p(1.0, 5.0, 0.1)),
+];
+
+fn prices_for(model: &str) -> Option<Price> {
+    PRICES
+        .iter()
+        .filter(|(id, _)| model.starts_with(id))
+        .max_by_key(|(id, _)| id.len())
+        .map(|(_, price)| *price)
+}
+
+fn cost_of(price: Price, t: &Tokens) -> f64 {
     let m = 1_000_000.0;
-    (t.input as f64 / m) * pin
-        + (t.output as f64 / m) * pout
-        + (t.cache_read as f64 / m) * (pin / 10.0)
-        + (t.cache_creation as f64 / m) * (pin * 1.25)
+    (t.input as f64 / m) * price.input
+        + (t.output as f64 / m) * price.output
+        + (t.cache_read as f64 / m) * (price.input * price.cache_read)
+        + (t.cache_creation as f64 / m) * (price.input * 1.25)
 }
 
 /// Theoretical list-price cost of a session, each model's tokens priced at
@@ -101,11 +128,11 @@ mod tests {
     fn opus_input_and_output() {
         approx(
             cost_usd(&session([("claude-opus-5", million(|t| &mut t.input))])),
-            15.0,
+            5.0,
         );
         approx(
             cost_usd(&session([("claude-opus-5", million(|t| &mut t.output))])),
-            75.0,
+            25.0,
         );
     }
 
@@ -116,7 +143,7 @@ mod tests {
                 "claude-opus-5",
                 million(|t| &mut t.cache_read),
             )])),
-            1.5,
+            0.5,
         );
     }
 
@@ -127,7 +154,7 @@ mod tests {
                 "claude-opus-5",
                 million(|t| &mut t.cache_creation),
             )])),
-            18.75,
+            6.25,
         );
     }
 
@@ -138,24 +165,24 @@ mod tests {
                 "claude-opus-5-20260101",
                 million(|t| &mut t.input),
             )])),
-            15.0,
+            5.0,
         );
     }
 
     #[test]
     fn a_mixed_session_prices_each_model_at_its_own_rate() {
         // A long Opus run with a trailing background Haiku call. Pricing the
-        // whole transcript at whichever model answered last was out by 15x.
+        // whole transcript at whichever model answered last was out by 5x.
         let cost = cost_usd(&session([
             ("claude-opus-5", million(|t| &mut t.output)),
             ("claude-haiku-4-5", million(|t| &mut t.output)),
         ]));
-        approx(cost, 75.0 + 5.0);
+        approx(cost, 25.0 + 5.0);
     }
 
     #[test]
     fn an_unknown_model_makes_the_whole_estimate_unknown() {
-        // Not 15.0 and not 0.0: part of the session has no price, so the
+        // Not 5.0 and not 0.0: part of the session has no price, so the
         // total is not a number anyone should be shown.
         assert_eq!(
             cost_usd(&session([
@@ -189,7 +216,7 @@ mod tests {
         // were enough to blank the cost of a whole session.
         let mut mixed = session([("claude-opus-5", million(|t| &mut t.input))]);
         mixed.insert("<synthetic>".into(), Tokens::default());
-        approx(cost_usd(&mixed), 15.0);
+        approx(cost_usd(&mixed), 5.0);
     }
 
     #[test]
@@ -203,22 +230,25 @@ mod tests {
     }
 
     #[test]
-    fn no_price_id_is_a_prefix_of_another() {
-        // `prices_for` takes the first entry the model id starts with, so a
-        // shorter id silently answers for a longer one: add ("claude-opus",
-        // ..) above ("claude-opus-5", ..) and every Opus 5 session is priced
-        // by the wrong row, with no error anywhere. The warning above PRICES
-        // has said so since the table was written; this is the part that
-        // fails the build.
-        //
-        // Checked in both directions, because the defect is the prefix
-        // relation itself — reordering the table hides it from one direction
-        // while leaving the next reorder free to reintroduce it.
-        for (i, (a, _, _)) in PRICES.iter().enumerate() {
-            for (b, _, _) in PRICES.iter().skip(i + 1) {
-                assert!(!b.starts_with(a), "{a} shadows {b}");
-                assert!(!a.starts_with(b), "{b} shadows {a}");
-            }
-        }
+    fn the_longest_matching_id_wins() {
+        // `claude-opus-5` is a prefix of `claude-opus-5-5`. First-match would
+        // price every Opus 5.5 session at Opus 5's rate with no error.
+        let input = |m: &str| cost_usd(&session([(m, million(|t| &mut t.input))]));
+        approx(input("claude-opus-5-5"), 4.0);
+        approx(input("claude-opus-5"), 5.0);
+        approx(input("claude-sonnet-5-5"), 2.0);
+        approx(input("claude-fable-5-2"), 8.0);
+        approx(input("claude-fable-5-1"), 10.0);
+        approx(input("claude-haiku-5-5"), 0.10);
+    }
+
+    #[test]
+    fn cache_read_discount_is_per_model() {
+        let read = |m: &str| cost_usd(&session([(m, million(|t| &mut t.cache_read))]));
+        approx(read("claude-fable-5-2"), 0.20);
+        approx(read("claude-fable-5"), 1.0);
+        approx(read("claude-opus-5-5"), 0.20);
+        approx(read("claude-sonnet-5-5"), 0.10);
+        approx(read("claude-sonnet-5"), 0.20);
     }
 }
