@@ -70,7 +70,13 @@ const PRICES: &[(&str, Price)] = &[
 fn prices_for(model: &str) -> Option<Price> {
     PRICES
         .iter()
-        .filter(|(id, _)| model.starts_with(id))
+        // The id must end at a separator, not mid-token: otherwise
+        // `claude-fable-5-2` would claim a dated `claude-fable-5-20261001`.
+        .filter(|(id, _)| {
+            model
+                .strip_prefix(id)
+                .is_some_and(|rest| !rest.starts_with(|c: char| c.is_ascii_alphanumeric()))
+        })
         .max_by_key(|(id, _)| id.len())
         .map(|(_, price)| *price)
 }
@@ -247,6 +253,14 @@ mod tests {
         approx(input("claude-fable-5-2"), 8.0);
         approx(input("claude-fable-5-1"), 10.0);
         approx(input("claude-haiku-5-5"), 0.10);
+    }
+
+    #[test]
+    fn a_dated_id_is_not_claimed_by_a_longer_entry() {
+        let input = |m: &str| cost_usd(&session([(m, million(|t| &mut t.input))]));
+        approx(input("claude-fable-5-20261001"), 10.0);
+        approx(input("claude-fable-5-2-20261101"), 8.0);
+        approx(input("claude-opus-5-5[1m]"), 4.0);
     }
 
     #[test]
