@@ -20,6 +20,13 @@ impl Tokens {
         self.cache_read += other.cache_read;
         self.cache_creation += other.cache_creation;
     }
+
+    pub fn sub(&mut self, other: &Tokens) {
+        self.input = self.input.saturating_sub(other.input);
+        self.output = self.output.saturating_sub(other.output);
+        self.cache_read = self.cache_read.saturating_sub(other.cache_read);
+        self.cache_creation = self.cache_creation.saturating_sub(other.cache_creation);
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]

@@ -62,6 +62,8 @@ struct RawUsage {
 #[derive(Deserialize)]
 struct RawMessage {
     #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
     model: Option<String>,
     #[serde(default)]
     usage: Option<RawUsage>,
@@ -83,6 +85,11 @@ pub struct Tailer {
     path: PathBuf,
     offset: u64,
     info: SessionInfo,
+    /// What each message id has already contributed, and under which model.
+    /// Claude Code writes one line per content block of a response (thinking,
+    /// text, each tool call), every one carrying the whole response's usage,
+    /// so summing lines counted a three-block turn three times.
+    counted: HashMap<String, (String, Tokens)>,
     notes: crate::diag::Notes,
 }
 
@@ -123,6 +130,7 @@ impl Tailer {
                 session_id,
                 ..Default::default()
             },
+            counted: HashMap::new(),
             notes: crate::diag::Notes::default(),
         }
     }
@@ -177,6 +185,7 @@ impl Tailer {
                 session_id: std::mem::take(&mut self.info.session_id),
                 ..Default::default()
             };
+            self.counted.clear();
         }
 
         let mut reader = BufReader::new(file);
@@ -252,9 +261,21 @@ impl Tailer {
                 cache_read: u.cache_read_input_tokens,
                 cache_creation: u.cache_creation_input_tokens,
             };
+            // A repeated id replaces what it counted before rather than adding
+            // to it. Lines without an id are summed, as there is nothing to
+            // tell them apart by.
+            if let Some((model, old)) = msg.id.as_ref().and_then(|id| self.counted.get(id)) {
+                self.info.tokens.sub(old);
+                if let Some(m) = self.info.by_model.get_mut(model) {
+                    m.sub(old);
+                }
+            }
             self.info.tokens.add(&t);
             let model = self.info.model.clone();
-            self.info.by_model.entry(model).or_default().add(&t);
+            self.info.by_model.entry(model.clone()).or_default().add(&t);
+            if let Some(id) = msg.id {
+                self.counted.insert(id, (model, t));
+            }
         }
         true
     }
@@ -289,6 +310,35 @@ mod tests {
         p.push(format!("cu-{}-{}.jsonl", name, std::process::id()));
         std::fs::remove_file(&p).ok();
         p
+    }
+
+    #[test]
+    fn a_response_split_over_several_lines_is_counted_once() {
+        // Real transcripts write one line per content block, each carrying
+        // the full usage of the response, under one message id.
+        let with_id = |id: &str, out: u64| {
+            line("claude-opus-5", out)
+                .replace(r#""message":{"#, &format!(r#""message":{{"id":"{id}","#))
+        };
+        let p = scratch("dedupe");
+        std::fs::write(
+            &p,
+            format!(
+                "{}\n{}\n{}\n{}\n",
+                with_id("msg_a", 10),
+                with_id("msg_a", 10),
+                with_id("msg_a", 12),
+                with_id("msg_b", 5)
+            ),
+        )
+        .unwrap();
+        let mut t = Tailer::new(p.clone());
+        let info = t.poll();
+        // msg_a's last line (12) replaces its earlier ones; msg_b adds 5.
+        assert_eq!(info.tokens.output, 17);
+        assert_eq!(info.tokens.cache_read, 200);
+        assert_eq!(info.by_model["claude-opus-5"].output, 17);
+        std::fs::remove_file(p).ok();
     }
 
     #[test]
