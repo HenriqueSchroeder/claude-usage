@@ -34,14 +34,25 @@ poll_seconds = 60
 #                     the menu, so any of these can be checked.
 #   {cost}            session cost estimate, or "—" if a model in the
 #                     session has no known price
-#   {project}, {model}, {tokens}   from the active session; all three
-#                     render "—" while no session is running, which is the
-#                     normal state whenever you are not mid-task
+#   {tokens}          the active session's OUTPUT tokens (the menu shows
+#                     input, output and cache separately)
+#   {project}, {model}, {tokens}, {cost}   from the active session; all
+#                     render "—" while no session is running (no assistant
+#                     turn in the last 30 minutes), the normal idle state
+#
+# A literal "{" that does not open a placeholder is kept as text.
+#
+# Three states replace the template entirely, and rules are not applied:
+# "⚠ reautenticar" (token rejected), "⚠ sem credencial" (no credentials
+# file) and "⚠ sem dados" (no reading yet). A reading that could not be
+# refreshed keeps the template and gets its age appended, e.g. "35% · 3m".
 format = "{auto}"
 
 # Optional rules that override the format and/or color when a metric crosses
 # a value. Rules are checked top to bottom; the first match wins. `metric`
-# is one of "session", "weekly", "cost". `color` is a "#rrggbb" hex string.
+# is one of "session", "weekly", "cost". `above` is inclusive (above = 90
+# matches at exactly 90). A "session" rule never matches while there is no
+# 5-hour window. `color` is a "#rrggbb" hex string.
 #
 # `effect = "pulse"` here WORKS, two ways: it sets the StatusNotifierItem
 # status to NeedsAttention for as long as the rule stays matched (whether a

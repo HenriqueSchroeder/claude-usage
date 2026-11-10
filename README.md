@@ -55,6 +55,12 @@ reading as stale until a response with both windows arrives. On the very
 first successful poll there is nothing yet to fall back on, so a response
 missing a window there is treated the same as a failed poll.
 
+A window sent as an explicit `null` is different from a missing one. The
+endpoint answers `"five_hour": null` when there is no 5-hour window — none
+running, or a plan without that limit — and that is a reading, not a gap:
+the session part leaves the bar and the menu instead of being carried over
+or shown as 0%.
+
 ## Credentials: read-only, always
 
 `claude-usage` reads the OAuth access token from
@@ -111,7 +117,7 @@ nested under an `[events]` table):
 |---|---|---|
 | `poll_seconds` | `60` | Floored to 10 |
 | `[bar].format` | `"{auto}"` | Placeholders: `{auto}` (both windows, or the weekly one alone when there is no 5-hour window), `{session}` (`—` when there is no 5-hour window), `{weekly}`, `{session_reset}`, `{weekly_reset}`, `{reset}`, `{cost}`, `{project}`, `{model}`, `{tokens}` — see the note on `{reset}` below |
-| `[bar].rules` | `[]` | Array of `{metric, above, format?, color?, effect?}`; first match (top to bottom) wins |
+| `[bar].rules` | `[]` | Array of `{metric, above, format?, color?, effect?}`; first match (top to bottom) wins; `above` is inclusive |
 | `[bar].rules[].effect` | `"pulse"` (opt-in per rule) | **Works** — flips the tray status to `NeedsAttention` and plays a brief frame-by-frame pulse the moment the level is crossed; see note below |
 | `[threshold].levels` | `[75, 90, 95]` | Percentages that trigger a notification |
 | `[threshold].hysteresis` | `2.0` | Points a level must drop below itself to rearm |
