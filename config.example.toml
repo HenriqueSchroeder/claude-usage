@@ -17,7 +17,11 @@ poll_seconds = 60
 # literal in the output instead of vanishing, so mistakes are visible.
 #
 # Placeholders:
-#   {session}         5-hour window usage, whole percent
+#   {auto}            "12% · 35%" (5-hour · weekly), or just "35%" when there
+#                     is no 5-hour window: none running, or a plan without
+#                     that limit
+#   {session}         5-hour window usage, whole percent; "—" when there is
+#                     no 5-hour window
 #   {weekly}          7-day window usage, whole percent
 #   {session_reset}   time until the 5-hour window clears (e.g. "2h10m")
 #   {weekly_reset}    time until the 7-day window clears
@@ -33,7 +37,7 @@ poll_seconds = 60
 #   {project}, {model}, {tokens}   from the active session; all three
 #                     render "—" while no session is running, which is the
 #                     normal state whenever you are not mid-task
-format = "{session}% · {weekly}%"
+format = "{auto}"
 
 # Optional rules that override the format and/or color when a metric crosses
 # a value. Rules are checked top to bottom; the first match wins. `metric`

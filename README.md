@@ -10,8 +10,10 @@ A [StatusNotifierItem](https://www.freedesktop.org/wiki/Specifications/StatusNot
 in the top panel with two parts:
 
 - **A text label** next to the icon (e.g. `17% · 18%`), showing the current
-  5-hour session usage and 7-day weekly usage. The template is configurable
-  — see [Configuration](#configuration).
+  5-hour session usage and 7-day weekly usage. When there is no 5-hour
+  window — none running, or a plan without that limit — it shows the weekly
+  usage alone (e.g. `35%`). The template is configurable — see
+  [Configuration](#configuration).
 - **A drawn ring icon**, an ARGB arc that fills clockwise with the weekly
   usage percentage. It uses no image assets; every pixel is computed at
   runtime.
@@ -108,7 +110,7 @@ nested under an `[events]` table):
 | Key | Default | Notes |
 |---|---|---|
 | `poll_seconds` | `60` | Floored to 10 |
-| `[bar].format` | `"{session}% · {weekly}%"` | Placeholders: `{session}`, `{weekly}`, `{session_reset}`, `{weekly_reset}`, `{reset}`, `{cost}`, `{project}`, `{model}`, `{tokens}` — see the note on `{reset}` below |
+| `[bar].format` | `"{auto}"` | Placeholders: `{auto}` (both windows, or the weekly one alone when there is no 5-hour window), `{session}` (`—` when there is no 5-hour window), `{weekly}`, `{session_reset}`, `{weekly_reset}`, `{reset}`, `{cost}`, `{project}`, `{model}`, `{tokens}` — see the note on `{reset}` below |
 | `[bar].rules` | `[]` | Array of `{metric, above, format?, color?, effect?}`; first match (top to bottom) wins |
 | `[bar].rules[].effect` | `"pulse"` (opt-in per rule) | **Works** — flips the tray status to `NeedsAttention` and plays a brief frame-by-frame pulse the moment the level is crossed; see note below |
 | `[threshold].levels` | `[75, 90, 95]` | Percentages that trigger a notification |
