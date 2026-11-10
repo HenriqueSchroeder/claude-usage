@@ -30,12 +30,19 @@ pub struct Snapshot {
 impl Snapshot {
     /// `None` when there is no five-hour window to show, which callers must
     /// leave out rather than draw as 0%.
+    ///
+    /// Both percentages come back rounded to the whole number the panel
+    /// shows, so a rule or a notification level is judged against the same
+    /// figure the user reads: "95%" on the bar and `above = 95` not matching
+    /// was the raw 94.6 being compared behind the label's back.
     pub fn session_pct(&self) -> Option<f32> {
-        Some(self.quota.as_ref()?.session.as_ref()?.percent)
+        Some(self.quota.as_ref()?.session.as_ref()?.percent.round())
     }
 
     pub fn weekly_pct(&self) -> f32 {
-        self.quota.as_ref().map_or(0.0, |q| q.weekly.percent)
+        self.quota
+            .as_ref()
+            .map_or(0.0, |q| q.weekly.percent.round())
     }
 
     /// Time until the 5-hour window clears, if the endpoint said when.

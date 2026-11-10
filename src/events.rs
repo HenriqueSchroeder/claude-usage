@@ -117,15 +117,15 @@ impl Detector {
                 // one is a first sighting rather than an "advance" that would
                 // announce a reset hours late, at the first prompt of the
                 // next session.
-                (Metric::Session, Some(q)) => match &q.session {
-                    Some(w) => (w.percent, w.resets_at),
-                    None => {
+                (Metric::Session, Some(q)) => match (&q.session, snap.session_pct()) {
+                    (Some(w), Some(pct)) => (pct, w.resets_at),
+                    _ => {
                         self.state.last_session_reset = None;
                         self.state.armed_session.clear();
                         continue;
                     }
                 },
-                (Metric::Weekly, Some(q)) => (q.weekly.percent, q.weekly.resets_at),
+                (Metric::Weekly, Some(q)) => (snap.weekly_pct(), q.weekly.resets_at),
             };
 
             let ts = resets_at.map(|t| t.unix_timestamp());
@@ -213,6 +213,17 @@ mod tests {
             quota: Some(q),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn a_level_fires_when_the_shown_figure_reaches_it() {
+        // The panel reads "95%" at 94.6; the notification must agree.
+        let mut d = Detector::new(cfg());
+        d.diff(&snap(10.0));
+        assert!(d
+            .diff(&snap(94.6))
+            .iter()
+            .any(|e| matches!(e, Event::ThresholdCrossed { level: 95, .. })));
     }
 
     fn snap_with_health(health: Health) -> Snapshot {

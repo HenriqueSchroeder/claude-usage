@@ -352,6 +352,17 @@ mod tests {
     }
 
     #[test]
+    fn a_rule_judges_the_number_the_label_shows() {
+        let cfg = BarConfig {
+            format: "{weekly}%".into(),
+            rules: vec![rule("weekly", 95.0, "#e01b24")],
+        };
+        let out = render(&cfg, &snap(10.0, 94.6), NOW);
+        assert_eq!(out.text, "95%");
+        assert_eq!(out.color, Rgb(0xe0, 0x1b, 0x24));
+    }
+
+    #[test]
     fn first_matching_rule_wins() {
         let cfg = BarConfig {
             format: "{weekly}%".into(),

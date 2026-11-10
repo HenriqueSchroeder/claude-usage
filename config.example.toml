@@ -51,7 +51,8 @@ format = "{auto}"
 # Optional rules that override the format and/or color when a metric crosses
 # a value. Rules are checked top to bottom; the first match wins. `metric`
 # is one of "session", "weekly", "cost". `above` is inclusive (above = 90
-# matches at exactly 90). A "session" rule never matches while there is no
+# matches at exactly 90) and, like [threshold].levels, is judged against the
+# whole percent shown on the bar, so "95%" always satisfies above = 95. A "session" rule never matches while there is no
 # 5-hour window. `color` is a "#rrggbb" hex string.
 #
 # `effect = "pulse"` here WORKS, two ways: it sets the StatusNotifierItem
