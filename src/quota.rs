@@ -99,10 +99,20 @@ struct RawBreakdown {
     rows: Option<Vec<RawBreakdownRow>>,
 }
 
+/// Tells a key sent as `null` (`Some(None)`) from a key not sent at all
+/// (`None`, via `#[serde(default)]`). Plain `Option` folds the two together.
+fn present<'de, D, T>(d: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    T::deserialize(d).map(Some)
+}
+
 #[derive(Deserialize, Default)]
 struct RawUsage {
-    #[serde(default)]
-    five_hour: Option<RawWindow>,
+    #[serde(default, deserialize_with = "present")]
+    five_hour: Option<Option<RawWindow>>,
     #[serde(default)]
     seven_day: Option<RawWindow>,
     #[serde(default)]
@@ -128,8 +138,8 @@ fn window_from_limit(l: &RawLimit) -> Option<Window> {
 }
 
 /// `None` when the window carries no utilization, for the same reason.
-fn window_from_raw(w: &Option<RawWindow>) -> Option<Window> {
-    let w = w.as_ref()?;
+fn window_from_raw(w: Option<&RawWindow>) -> Option<Window> {
+    let w = w?;
     Some(Window {
         percent: w.utilization?,
         resets_at: parse_ts(&w.resets_at),
@@ -236,8 +246,8 @@ pub fn fetch(agent: &ureq::Agent, token: &str) -> Result<ParsedUsage, FetchError
 pub fn parse_usage(bytes: &[u8]) -> Result<ParsedUsage, String> {
     let raw: RawUsage = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
 
-    let mut session = window_from_raw(&raw.five_hour);
-    let mut weekly = window_from_raw(&raw.seven_day);
+    let mut session = window_from_raw(raw.five_hour.as_ref().and_then(Option::as_ref));
+    let mut weekly = window_from_raw(raw.seven_day.as_ref());
 
     // limits[] is the normalized form and carries server-decided severity, so
     // it wins over the top-level windows — but only when it actually brought a
@@ -256,6 +266,15 @@ pub fn parse_usage(bytes: &[u8]) -> Result<ParsedUsage, String> {
              utilization, or limits[].percent)"
                 .into(),
         );
+    }
+
+    // With no five-hour window running, the endpoint sends `five_hour: null`
+    // and no `session` entry in limits[]. Next to a real weekly number that
+    // is a reading — nothing used, nothing to reset — not a dropped key: a
+    // renamed key would be absent, not present and null. Checked after the
+    // test above so an all-null response still fails.
+    if session.is_none() && matches!(raw.five_hour, Some(None)) {
+        session = Some(Window::default());
     }
 
     let breakdown = raw
@@ -336,6 +355,22 @@ mod tests {
         let json = br#"{"five_hour":null,"seven_day":null,"limits":null,
                         "seven_day_breakdown":null}"#;
         assert!(parse_usage(json).is_err());
+    }
+
+    #[test]
+    fn a_null_session_beside_a_real_week_is_an_idle_session() {
+        // What the endpoint answers when no five-hour window is running.
+        // Treating it as a dropped window left a fresh install with no
+        // reading at all until the user happened to start a session.
+        let q = parse_usage(
+            br#"{"five_hour":null,"seven_day":{"utilization":35.0},
+                 "limits":[{"kind":"weekly_all","percent":35}]}"#,
+        )
+        .unwrap();
+        let session = q.session.expect("an idle session is a reading");
+        assert_eq!(session.percent, 0.0);
+        assert!(session.resets_at.is_none());
+        assert_eq!(q.weekly.unwrap().percent, 35.0);
     }
 
     #[test]
