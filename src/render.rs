@@ -101,6 +101,13 @@ fn expand(template: &str, snap: &Snapshot, now: OffsetDateTime) -> String {
             rest = "";
             break;
         };
+        // A stray `{` before the real one is literal text, not the start of a
+        // key: in "{ {weekly}%" the placeholder is `weekly`, not " {weekly".
+        if let Some(inner) = rest[start + 1..end].rfind('{').map(|i| start + 1 + i) {
+            out.push_str(&rest[start..inner]);
+            rest = &rest[inner..];
+            continue;
+        }
         let key = &rest[start + 1..end];
         let value = match key {
             "session" => Some(
@@ -233,6 +240,21 @@ mod tests {
             rules: vec![],
         };
         assert_eq!(render(&cfg, &snap(24.0, 98.0), NOW).text, "24% · 98%");
+    }
+
+    #[test]
+    fn a_stray_open_brace_does_not_swallow_the_next_placeholder() {
+        let fmt = |f: &str| {
+            let cfg = BarConfig {
+                format: f.into(),
+                rules: vec![],
+            };
+            render(&cfg, &snap(24.0, 98.0), NOW).text
+        };
+        assert_eq!(fmt("{ {weekly}%"), "{ 98%");
+        assert_eq!(fmt("{{weekly}}"), "{98}");
+        assert_eq!(fmt("{nope {weekly}"), "{nope 98");
+        assert_eq!(fmt("{nope}"), "{nope}");
     }
 
     #[test]
