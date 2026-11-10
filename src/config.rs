@@ -105,8 +105,14 @@ impl Default for Config {
 }
 
 fn parse(text: &str) -> Config {
-    match toml::from_str(text) {
-        Ok(c) => c,
+    match toml::from_str::<Config>(text) {
+        Ok(mut c) => {
+            // A negative or NaN hysteresis rearms every level on every poll,
+            // so a crossed threshold would notify once a minute forever.
+            let h = c.threshold.hysteresis;
+            c.threshold.hysteresis = if h.is_finite() { h.max(0.0) } else { 2.0 };
+            c
+        }
         Err(e) => {
             eprintln!("claude-usage: invalid config, using defaults: {e}");
             Config::default()
@@ -157,6 +163,22 @@ effect = "pulse"
     fn invalid_toml_falls_back_to_defaults_not_panic() {
         let c = parse("this is not = = toml");
         assert_eq!(c.poll_seconds, 60);
+    }
+
+    #[test]
+    fn a_hysteresis_that_would_never_hold_a_level_is_corrected() {
+        assert_eq!(
+            parse("[threshold]\nhysteresis = -2.0").threshold.hysteresis,
+            0.0
+        );
+        assert_eq!(
+            parse("[threshold]\nhysteresis = nan").threshold.hysteresis,
+            2.0
+        );
+        assert_eq!(
+            parse("[threshold]\nhysteresis = 5.0").threshold.hysteresis,
+            5.0
+        );
     }
 
     #[test]
