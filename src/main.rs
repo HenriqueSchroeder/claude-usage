@@ -72,6 +72,11 @@ struct Daemon {
     wakeup: Arc<tray::Wakeup>,
     notes: diag::Notes,
     failures: u32,
+    /// The credentials file's mtime when the token for the last poll was
+    /// read. A failed poll's wait compares against this, not against the
+    /// file as it is when the wait starts: a refresh landing during the
+    /// request would otherwise already be the baseline and never wake us.
+    creds_seen: Option<std::time::SystemTime>,
 }
 
 /// The result of reconciling one fetch against the last known reading.
@@ -86,6 +91,7 @@ struct Merged {
 
 impl Daemon {
     fn read_quota(&mut self, snap: &mut Snapshot, now: OffsetDateTime) {
+        self.creds_seen = self.creds_mtime();
         let token = match creds::read_access_token(&self.creds_path) {
             Ok(t) => t,
             Err(e) => {
@@ -395,7 +401,7 @@ impl Daemon {
             return;
         }
 
-        let before = self.creds_mtime();
+        let before = self.creds_seen;
         let deadline = Instant::now() + Duration::from_secs(seconds);
         while let Some(left) = deadline.checked_duration_since(Instant::now()) {
             if self.nap(CREDS_CHECK_INTERVAL.min(left)) {
@@ -478,6 +484,7 @@ fn main() {
         wakeup: Arc::clone(&wakeup),
         notes: diag::Notes::default(),
         failures: 0,
+        creds_seen: None,
     };
 
     // First reading before the item appears, so the panel never shows a
@@ -568,6 +575,7 @@ mod tests {
             wakeup: Arc::new(tray::Wakeup::default()),
             notes: diag::Notes::default(),
             failures: 0,
+            creds_seen: None,
         }
     }
 
